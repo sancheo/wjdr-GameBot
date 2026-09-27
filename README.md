@@ -93,4 +93,4 @@ python3 help_bot.py --device emulator-5554 --train --duration 600
 模板和阈值还需要更多游戏状态验证；无法确认页面或领取结果时程序会停止，避免误点。
 
 `assets/` 中是用于识别的局部图标；`artifacts/` 中的完整设备截图
-包含角色和聊天信息，已被 `.gitignore` 排除。
+可能包含角色和聊天信息，提交前请检查。
