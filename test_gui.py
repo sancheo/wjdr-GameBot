@@ -46,6 +46,15 @@ emulator-5556 offline
 
 @unittest.skipUnless(os.environ.get("GAMEBOT_GUI_TEST") == "1", "requires a desktop session")
 class WindowInteractionTest(unittest.TestCase):
+    @staticmethod
+    def settle_resize(root):
+        # Win32 delivers native resize messages via the event queue; Cocoa can
+        # service live resize via idle events alone.
+        if gui.sys.platform == "win32":
+            root.update()
+        else:
+            root.update_idletasks()
+
     def test_controls_layout_and_log_view(self):
         root = gui.tk.Tk()
         try:
@@ -56,6 +65,14 @@ class WindowInteractionTest(unittest.TestCase):
             self.assertEqual(window._layout_columns, 3)
             self.assertEqual([int(card.grid_info()["column"]) for card in window.task_cards], [0, 1, 2])
             self.assertFalse(window.scrollbar.winfo_ismapped())
+            left = window.device_panel.winfo_rootx() - root.winfo_rootx()
+            right = root.winfo_rootx() + root.winfo_width() - (
+                window.device_panel.winfo_rootx() + window.device_panel.winfo_width())
+            self.assertEqual(left, right)
+            self.assertEqual(left, 22)
+            self.assertEqual(window.subtitle.winfo_height(), window.subtitle.winfo_reqheight())
+            self.assertLessEqual(window.subtitle.winfo_rooty() + window.subtitle.winfo_height(),
+                                 window.header.winfo_rooty() + window.header.winfo_height())
             self.assertEqual(tuple(root.resizable()), (1, 1))
             self.assertFalse(window.log.winfo_ismapped())
             self.assertTrue(window.log_placeholder.winfo_ismapped())
@@ -72,15 +89,12 @@ class WindowInteractionTest(unittest.TestCase):
             window.device.set("Emulator A")
             picker.open_menu()
             root.update()
-            self.assertIsNotNone(picker.popup)
-            picker.choices.selection_clear(0, "end")
-            picker.choices.selection_set(1)
-            picker.choose()
+            self.assertEqual(tuple(picker.combo.cget("values")), ("Emulator A", "Emulator B"))
+            self.assertEqual(str(picker.combo.cget("state")), "readonly")
+            picker.combo.current(1)
             self.assertEqual(window.device.get(), "Emulator B")
-            self.assertIsNone(picker.popup)
-            picker.open_menu()
             picker.set_enabled(False)
-            self.assertIsNone(picker.popup)
+            self.assertEqual(str(picker.combo.cget("state")), "disabled")
 
             window.device_lookup = {"Emulator B": "emulator-test"}
             self.assertNotIn("--no-pet", window.command())
@@ -134,6 +148,7 @@ class WindowInteractionTest(unittest.TestCase):
                 root.update()
                 columns = 3 if root.winfo_width() >= 1040 else 2 if root.winfo_width() >= 740 else 1
                 self.assertEqual(window._layout_columns, columns)
+                self.assertEqual(window.content.winfo_width(), window.viewport.winfo_width())
                 for index, card in enumerate(window.task_cards):
                     self.assertEqual(int(card.grid_info()["row"]), index // columns)
                     self.assertEqual(int(card.grid_info()["column"]), index % columns)
@@ -158,7 +173,7 @@ class WindowInteractionTest(unittest.TestCase):
                     self.assertEqual(frame.origin.y, expected_y)
             # Only service geometry/idle events: no timer or manual layout call.
             root.geometry("1300x850")
-            root.update_idletasks()
+            self.settle_resize(root)
             wide_height = window.log_panel.winfo_reqheight()
             window.append_log("日志内容自动换行。" * 35)
             for _ in range(100):
@@ -168,7 +183,7 @@ class WindowInteractionTest(unittest.TestCase):
             self.assertGreater(window.log.yview()[0], 0)
             self.assertEqual(window.log.yview()[1], 1)
             root.geometry("560x560")
-            root.update_idletasks()
+            self.settle_resize(root)
             self.assertEqual(window._layout_columns, 1)
             self.assertEqual(window.log_panel.winfo_reqheight(), wide_height)
             self.assertTrue(window.scrollbar.winfo_ismapped())
@@ -178,7 +193,7 @@ class WindowInteractionTest(unittest.TestCase):
                                  window.viewport.winfo_rooty() + window.viewport.winfo_height())
             self.assertGreater(window.log.winfo_height(), 0)
             root.geometry("1300x850")
-            root.update_idletasks()
+            self.settle_resize(root)
             self.assertEqual(window._layout_columns, 3)
             self.assertEqual(window.log_panel.winfo_reqheight(), wide_height)
         finally:

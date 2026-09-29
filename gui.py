@@ -10,12 +10,16 @@ import threading
 import tkinter as tk
 from collections import OrderedDict
 from pathlib import Path
-from tkinter import messagebox
-from PIL import Image, ImageTk
+from tkinter import messagebox, ttk
+from PIL import Image, ImageDraw, ImageTk
+
+from platform_support import SUBPROCESS_OPTIONS, resolve_adb
 
 
 ROOT = Path(__file__).resolve().parent
-ADB = ROOT / ".tools/platform-tools/adb"
+ADB = resolve_adb()
+UI_FONT = "Microsoft YaHei UI" if sys.platform == "win32" else "Helvetica Neue"
+LOG_FONT = "Consolas" if sys.platform == "win32" else "Menlo"
 BG = "#EDF3FF"
 WHITE = "#FFFFFF"
 FIELD = "#F8FAFF"
@@ -84,7 +88,8 @@ UNITS = (("shield", "盾兵"), ("spear", "矛兵"), ("archer", "射手"))
 
 def discover_emulators():
     output = subprocess.run([str(ADB), "devices", "-l"], check=True, capture_output=True,
-                            text=True, timeout=15).stdout
+                            text=True, encoding="utf-8", errors="replace", timeout=15,
+                            **SUBPROCESS_OPTIONS).stdout
     found = []
     for line in output.splitlines()[1:]:
         parts = line.split()
@@ -96,7 +101,9 @@ def discover_emulators():
             try:
                 for prop in ("ro.kernel.qemu", "ro.boot.qemu"):
                     result = subprocess.run([str(ADB), "-s", serial, "shell", "getprop", prop],
-                                            check=True, capture_output=True, text=True, timeout=4)
+                                            check=True, capture_output=True, text=True,
+                                            encoding="utf-8", errors="replace", timeout=4,
+                                            **SUBPROCESS_OPTIONS)
                     if result.stdout.strip() == "1":
                         is_emulator = True
                         break
@@ -139,11 +146,19 @@ class Switch(tk.Canvas):
         fill = GREEN if on else TRACK
         if not self.enabled:
             fill = "#A6E8BF" if on else BORDER
-        self.create_line(*(px(self, value) for value in (12, 12, 30, 12)),
-                         width=px(self, 24), capstyle="round", fill=fill)
+        # Tk's native Canvas arcs are not antialiased on Windows. Render at
+        # 4x resolution and downsample both the track and thumb together.
+        scale = 4
+        bitmap = Image.new("RGB", (42 * scale, 24 * scale), self.cget("bg"))
+        painter = ImageDraw.Draw(bitmap)
+        painter.rounded_rectangle((0, 0, 42 * scale - 1, 24 * scale - 1),
+                                  radius=12 * scale, fill=fill)
         x = 20 if on else 2
-        self.create_oval(*(px(self, value) for value in (x, 2, x + 20, 22)),
-                         fill=WHITE, outline="")
+        painter.ellipse((x * scale, 2 * scale, (x + 20) * scale - 1, 22 * scale - 1),
+                        fill=WHITE)
+        self._switch_image = ImageTk.PhotoImage(
+            bitmap.resize((42, 24), Image.Resampling.LANCZOS), master=self)
+        self.create_image(0, 0, anchor="nw", image=self._switch_image)
 
 
 
@@ -153,7 +168,7 @@ class HintEntry(tk.Canvas):
         self.value = tk.StringVar(value=initial)
         self.entry = tk.Entry(self, textvariable=self.value, bg=FIELD, fg=TEXT, bd=0,
                               highlightthickness=0, insertbackground=TEXT,
-                              disabledbackground=FIELD, font=("Helvetica Neue", 13))
+                              disabledbackground=FIELD, font=(UI_FONT, 13))
         self.entry_id = self.create_window(13, 19, window=self.entry, anchor="w", height=26)
         self.entry.bind("<Up>", lambda _event: self.step_value(1))
         self.entry.bind("<Down>", lambda _event: self.step_value(-1))
@@ -226,104 +241,50 @@ class HintEntry(tk.Canvas):
         self.itemconfigure(self.entry_id, width=max(1, width - p(60)), height=p(26))
         if not self.value.get():
             self.create_text(p(13), p(19), text=self.hint, anchor="w", fill=MUTED,
-                             font=("Helvetica Neue", p(10)), tags="hint")
+                             font=(UI_FONT, p(10)), tags="hint")
             self.tag_bind("hint", "<Button-1>", lambda _event: self.entry.focus_set())
 
 
 class DevicePicker(tk.Canvas):
     def __init__(self, parent, variable):
         super().__init__(parent, width=340, height=36, bg=WHITE, bd=0,
-                         highlightthickness=0, takefocus=1, cursor="arrow")
+                         highlightthickness=0, takefocus=0, cursor="arrow")
         self.variable = variable
         self.values = ()
         self.enabled = False
-        self.popup = None
-        self.variable.trace_add("write", lambda *_: self.draw())
+        # Native combobox owns popup mapping, mouse grabs and focus transitions.
+        # A borderless Toplevel/Listbox can lose focus while Windows maps it.
+        style = ttk.Style(self)
+        style.configure("Device.TCombobox", font=(UI_FONT, 12), padding=(8, 4))
+        self.combo = ttk.Combobox(self, textvariable=variable, state="disabled",
+                                  style="Device.TCombobox", font=(UI_FONT, 12), height=6)
+        self.combo_window = self.create_window(0, 0, anchor="nw", window=self.combo)
         self.bind("<Configure>", lambda _event: self.draw())
-        self.bind("<Button-1>", self.open_menu)
-        self.bind("<space>", self.open_menu)
-        self.bind("<Return>", self.open_menu)
-        self.bind("<Down>", self.open_menu)
-        self.bind_all("<Button-1>", self.dismiss_outside, add="+")
         self.draw()
 
     def set_values(self, values):
         self.close_menu()
         self.values = tuple(values)
+        self.combo.configure(values=self.values)
 
     def set_enabled(self, enabled):
         self.enabled = enabled
         if not enabled:
             self.close_menu()
-        self.draw()
+        self.combo.configure(state="readonly" if enabled else "disabled")
 
     def draw(self):
-        self.delete("all")
-        p = lambda value: px(self, value)
-        width = max(self.winfo_width(), p(80))
-        round_rect(self, 0, 0, width, p(36), p(8), BORDER)
-        round_rect(self, p(1), p(1), width - p(1), p(35), p(7), FIELD)
-        self.create_text(p(12), p(18), anchor="w", text=self.variable.get(),
-                         fill=TEXT if self.enabled else MUTED,
-                         font=("Helvetica Neue", p(12)))
-        # Keep long device names away from the arrow.
-        self.create_rectangle(width - p(32), p(3), width - p(8), p(33), fill=FIELD, outline=FIELD)
-        draw_asset(self, "ui/chevron.png", (12, 8), width - p(19), p(18))
+        self.itemconfigure(self.combo_window, width=max(self.winfo_width(), 80), height=36)
 
     def close_menu(self, _event=None):
-        if self.popup is not None:
-            self.popup.destroy()
-            self.popup = None
-
-    def choose(self, _event=None):
-        selection = self.choices.curselection()
-        if selection:
-            self.variable.set(self.values[selection[0]])
-        self.close_menu()
-        self.focus_set()
-        return "break"
+        self.tk.call("ttk::combobox::Unpost", self.combo)
 
     def open_menu(self, _event=None):
-        if self.popup is not None:
-            self.close_menu()
-            return "break"
         if not self.enabled or not self.values:
             return "break"
-        self.popup = tk.Toplevel(self, bg=WHITE, bd=0)
-        self.popup.overrideredirect(True)
-        self.popup.transient(self.winfo_toplevel())
-        self.choices = tk.Listbox(self.popup, bg=WHITE, fg=TEXT, bd=0,
-                                  highlightthickness=0, selectborderwidth=0,
-                                  selectbackground="#E8F0FF", selectforeground=BLUE,
-                                  activestyle="none", exportselection=False,
-                                  font=("Helvetica Neue", 12), height=min(6, len(self.values)))
-        self.choices.pack(fill="both", expand=True, padx=1, pady=6)
-        for value in self.values:
-            self.choices.insert("end", "  " + value)
-        selected = self.values.index(self.variable.get()) if self.variable.get() in self.values else 0
-        self.choices.selection_set(selected)
-        self.choices.activate(selected)
-        self.choices.see(selected)
-        self.popup.update_idletasks()
-        height = self.popup.winfo_reqheight()
-        y = self.winfo_rooty() + self.winfo_height() + 4
-        if y + height > self.winfo_screenheight():
-            y = self.winfo_rooty() - height - 4
-        self.popup.geometry(f"{self.winfo_width()}x{height}+{self.winfo_rootx()}+{y}")
-        self.choices.bind("<ButtonRelease-1>", self.choose)
-        self.choices.bind("<Return>", self.choose)
-        self.choices.bind("<Escape>", self.close_menu)
-        self.choices.bind("<FocusOut>", self.close_menu)
-        self.choices.focus_set()
+        self.combo.focus_set()
+        self.tk.call("ttk::combobox::Post", self.combo)
         return "break"
-
-    def dismiss_outside(self, event):
-        if self.popup is None:
-            return
-        inside_popup = (self.popup.winfo_rootx() <= event.x_root < self.popup.winfo_rootx() + self.popup.winfo_width()
-                        and self.popup.winfo_rooty() <= event.y_root < self.popup.winfo_rooty() + self.popup.winfo_height())
-        if not inside_popup:
-            self.close_menu()
 
 
 def round_rect(canvas, x1, y1, x2, y2, radius, color):
@@ -403,7 +364,7 @@ class ActionButton(tk.Canvas):
         if self.mode == "start":
             draw_asset(self, "ui/play.png", (14, 16), p(41), p(22))
         self.create_text(width / 2 + (p(10) if self.mode == "start" else 0), p(22),
-                         text=label, fill=WHITE, font=("Helvetica Neue", p(14), "bold"))
+                         text=label, fill=WHITE, font=(UI_FONT, p(14), "bold"))
 
 
 class RefreshButton(tk.Canvas):
@@ -434,7 +395,7 @@ class RefreshButton(tk.Canvas):
         round_rect(self, p(1), p(1), p(93), p(35), p(7), FIELD)
         draw_asset(self, "ui/refresh.png", (18, 18), p(29), p(18))
         self.create_text(p(62), p(18), text="刷新", fill=TEXT if self.enabled else MUTED,
-                         font=("Helvetica Neue", p(12)))
+                         font=(UI_FONT, p(12)))
 
 
 class BotWindow:
@@ -481,18 +442,18 @@ class BotWindow:
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(4, weight=1, minsize=180)
 
-        header = tk.Frame(frame, bg=BG, height=58)
+        self.header = header = tk.Frame(frame, bg=BG)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        header.pack_propagate(False)
         self.logo_label = image_label(header, "gamebot-icon.png", 46, BG)
         self.logo_label.pack(side="left", padx=(8, 14))
         self.native_images = []
         branding = tk.Frame(header, bg=BG)
         branding.pack(side="left", anchor="center")
         tk.Label(branding, text="无尽冬日 GameBot", bg=BG, fg=TEXT,
-                 font=("Helvetica Neue", 22, "bold")).pack(anchor="w")
-        tk.Label(branding, text="自动任务控制台", bg=BG, fg=MUTED,
-                 font=("Helvetica Neue", 11)).pack(anchor="w")
+                 font=(UI_FONT, 22, "bold")).pack(anchor="w")
+        self.subtitle = tk.Label(branding, text="自动任务控制台", bg=BG, fg=MUTED,
+                                 font=(UI_FONT, 11))
+        self.subtitle.pack(anchor="w")
 
         self.device_panel = device_panel = Panel(frame, inset=17)
         device_panel.configure(height=118)
@@ -503,7 +464,7 @@ class BotWindow:
         self.device_group = device_group = tk.Frame(device, bg=WHITE)
         device_group.grid(row=0, column=1, sticky="ew")
         tk.Label(device_group, text="模拟器", bg=WHITE, fg=TEXT,
-                 font=("Helvetica Neue", 13, "bold")).pack(anchor="w", pady=(0, 4))
+                 font=(UI_FONT, 13, "bold")).pack(anchor="w", pady=(0, 4))
         device_row = tk.Frame(device_group, bg=WHITE)
         device_row.pack(fill="x")
         self.device_box = DevicePicker(device_row, self.device)
@@ -511,14 +472,14 @@ class BotWindow:
         self.refresh_button = RefreshButton(device_row, self.refresh_devices)
         self.refresh_button.pack(side="left", padx=(10, 0))
         self.device_status = tk.Label(device_group, text="正在查找模拟器…", bg=WHITE, fg=MUTED,
-                                      font=("Helvetica Neue", 10))
+                                      font=(UI_FONT, 10))
         self.device_status.pack(anchor="w", pady=(4, 0))
         self.device_divider = tk.Frame(device, bg=BORDER, width=1)
         self.device_divider.grid(row=0, column=2, sticky="ns", padx=18)
         self.action_group = action_group = tk.Frame(device, bg=WHITE)
         action_group.grid(row=0, column=3, sticky="e")
         self.status_label = tk.Label(action_group, text="● 未运行", bg=WHITE, fg=MUTED,
-                                     font=("Helvetica Neue", 11))
+                                     font=(UI_FONT, 11))
         self.status_label.pack(side="left", padx=(0, 12))
         self.start_button = ActionButton(action_group, self.toggle)
         self.start_button.pack(side="left")
@@ -527,9 +488,9 @@ class BotWindow:
         heading.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         badge(heading, "gear", size=38, background=BG).pack(side="left", padx=(2, 10))
         tk.Label(heading, text="自动任务", bg=BG, fg=TEXT,
-                 font=("Helvetica Neue", 18, "bold")).pack(side="left")
+                 font=(UI_FONT, 18, "bold")).pack(side="left")
         tk.Label(heading, text="到期自动检查，重连后立即复查", bg=BG, fg=MUTED,
-                 font=("Helvetica Neue", 10)).pack(side="right")
+                 font=(UI_FONT, 10)).pack(side="right")
         badge(heading, "clock", size=15, background=BG).pack(side="right", padx=(0, 7))
 
         self.cards = cards = tk.Frame(frame, bg=BG)
@@ -566,16 +527,16 @@ class BotWindow:
         log_heading.pack(fill="x", pady=(0, 6))
         badge(log_heading, "terminal", size=26).pack(side="left", padx=(2, 10))
         tk.Label(log_heading, text="运行日志", bg=WHITE, fg=TEXT,
-                 font=("Helvetica Neue", 15, "bold")).pack(side="left")
+                 font=(UI_FONT, 15, "bold")).pack(side="left")
         tk.Label(log_heading, text="异常会弹窗提示", bg=WHITE, fg=MUTED,
-                 font=("Helvetica Neue", 10)).pack(side="right")
+                 font=(UI_FONT, 10)).pack(side="right")
         badge(log_heading, "info", size=15).pack(side="right", padx=(0, 7))
         log_area = tk.Frame(log_panel.body, bg=FIELD, highlightthickness=1,
                             highlightbackground=BORDER)
         log_area.pack(fill="both", expand=True)
         self.log = tk.Text(log_area, state="disabled", wrap="char", width=1, height=5, bg=FIELD,
                            fg=TEXT, bd=0, padx=14, pady=9, highlightthickness=0,
-                           font=("Menlo", 11))
+                           font=(LOG_FONT, 11))
         self.log.tag_configure("task_disabled", foreground=RED)
         self.log_scrollbar = tk.Scrollbar(log_area, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=self.log_scrollbar.set)
@@ -585,9 +546,9 @@ class BotWindow:
         empty_content.place(relx=.5, rely=.5, anchor="center")
         badge(empty_content, "document", size=30, background=FIELD).pack(pady=(0, 3))
         tk.Label(empty_content, text="暂无日志", bg=FIELD, fg=MUTED,
-                 font=("Helvetica Neue", 11, "bold")).pack()
+                 font=(UI_FONT, 11, "bold")).pack()
         tk.Label(empty_content, text="启动后将在这里显示运行记录", bg=FIELD, fg=MUTED,
-                 font=("Helvetica Neue", 9)).pack()
+                 font=(UI_FONT, 9)).pack()
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(0, self.refresh_devices)
         if sys.platform == "darwin":
@@ -643,6 +604,13 @@ class BotWindow:
                 self.device_panel.configure(height=118)
             self.device_box.configure(width=180 if columns == 1 else 340)
         self.device_status.configure(wraplength=max(200, self.device_group.winfo_width()))
+        # Canvas windows do not propagate child requests. Windows fonts need
+        # more vertical space than the original macOS card defaults.
+        for card in self.task_cards:
+            card.configure(height=max(300, card.body.winfo_reqheight() + 2 * card.inset))
+        self.device_panel.configure(height=max(118 if columns == 3 else 174,
+                                               self.device_panel.body.winfo_reqheight() +
+                                               2 * self.device_panel.inset))
         # Settle grid requests before sizing the canvas window; otherwise a narrow
         # layout can retain the old height and make its bottom unreachable.
         self.root.update_idletasks()
@@ -691,7 +659,8 @@ class BotWindow:
             view.setFrame_(((x, native_y), (size, size)))
 
     def resize_content(self, event):
-        self.viewport.itemconfigure(self.content_id, width=max(1, event.width - 14))
+        # The scrollbar overlays the outer padding; reserve no one-sided gutter.
+        self.viewport.itemconfigure(self.content_id, width=max(1, event.width))
         self.schedule_layout(event)
 
     def update_scrollregion(self, _event=None):
@@ -718,7 +687,7 @@ class BotWindow:
         header.pack(fill="x", pady=(0, 6))
         badge(header, icon, size=34).pack(side="left", padx=(0, 10))
         tk.Label(header, text=title, bg=WHITE, fg=TEXT,
-                 font=("Helvetica Neue", 14, "bold")).pack(side="left")
+                 font=(UI_FONT, 14, "bold")).pack(side="left")
         body = tk.Frame(card.body, bg=WHITE)
         body.pack(fill="both", expand=True)
         return card, body
@@ -730,7 +699,7 @@ class BotWindow:
         switch = Switch(row, self.options[name], command)
         switch.pack(side="right", pady=3)
         text = tk.Label(row, text=label, bg=WHITE, fg=MUTED if indent else TEXT,
-                        font=("Helvetica Neue", 11), cursor="arrow")
+                        font=(UI_FONT, 11), cursor="arrow")
         text.pack(side="left", padx=(18 if indent else 2, 0))
         text.bind("<Button-1>", switch.toggle)
         tk.Frame(row, bg=BORDER, height=1).place(relx=0, rely=1, relwidth=1, anchor="sw")
@@ -740,7 +709,7 @@ class BotWindow:
         row = tk.Frame(parent, bg=WHITE)
         row.pack(fill="x", pady=(4, 6))
         tk.Label(row, text=label, bg=WHITE, fg=MUTED,
-                 font=("Helvetica Neue", 10)).pack(anchor="w", pady=(0, 5))
+                 font=(UI_FONT, 10)).pack(anchor="w", pady=(0, 5))
         entry = HintEntry(row, initial, hint)
         entry.pack(fill="x")
         return entry
@@ -798,7 +767,7 @@ class BotWindow:
         serial = self.device_lookup.get(self.device.get())
         if not serial:
             raise ValueError("请先连接并选择一台模拟器")
-        cmd = [sys.executable, "-u", str(ROOT / "help_bot.py"), "--device", serial,
+        cmd = [sys.executable, "-X", "utf8", "-u", str(ROOT / "help_bot.py"), "--device", serial,
                "--daily-tasks", "--forever"]
         for name, _ in (*TASKS, *UNITS):
             if not self.options[name].get():
@@ -833,7 +802,8 @@ class BotWindow:
         try:
             command = self.command()
             self.process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                            errors="replace", bufsize=1, **SUBPROCESS_OPTIONS)
         except (OSError, ValueError) as exc:
             messagebox.showerror("无法启动", str(exc), parent=self.root)
             return

@@ -119,6 +119,28 @@ class ScheduleTest(unittest.TestCase):
         self.assertEqual([bot.training_status(frame, y) for _, y in bot.TRAIN_ROWS],
                          ['busy', 'busy', 'upgrading'])
 
+    def test_training_title_survives_weather_but_rejects_other_units(self):
+        frame = Image.open(bot.ROOT / 'artifacts/training-weather.png').convert('RGB')
+        for unit, _ in bot.TRAIN_ROWS:
+            title = Image.open(bot.ROOT / f'assets/emulator-training-{unit}-title.png')
+            self.assertEqual(bot.training_page(frame, title), unit == 'shield')
+        title = Image.open(bot.ROOT / 'assets/emulator-training-shield-title.png')
+        frame.paste((90, 145, 185), bot.TRAIN_TITLE_BOX)
+        self.assertFalse(bot.training_page(frame, title))
+
+    def test_recovery_leaves_training_page_with_changed_weather(self):
+        frame = Image.open(bot.ROOT / 'artifacts/training-weather.png').convert('RGB')
+        city = Image.open(bot.ROOT / 'artifacts/pet-city.png').convert('RGB')
+        with (patch.object(bot, 'color_screenshot', return_value=frame),
+              patch.object(bot, 'inspect', side_effect=[(False, None, 100), (True, None, 0)]),
+              patch.object(bot, 'forced_offline', return_value=False),
+              patch.object(bot, 'task_page', return_value=False),
+              patch.object(bot, 'island_page', return_value=False),
+              patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'task_screen', return_value=city)):
+            self.assertIs(bot.recover_task_city('test', *([None] * 4)), city)
+        tap.assert_called_once_with('test', 60, 190)
+
     def test_startup_order_and_disabled_tasks(self):
         for disabled in ([], ['train', 'donate', 'warehouse', 'recruit', 'pet']):
             options = ['help_bot.py', '--device', 'emulator-test', '--daily-tasks']
@@ -267,7 +289,8 @@ class ScheduleTest(unittest.TestCase):
 
     def test_multiple_crystals_are_all_claimed(self):
         frame = Image.new('RGB', (1080, 2340))
-        with (patch.object(bot, 'crystal_target', side_effect=[(200, 700), None, (600, 900), None, None]),
+        with (patch.object(bot, 'crystal_target', side_effect=[
+                  (200, 700), None, None, (600, 900), None, None, None, None, None]),
               patch.object(bot, 'task_tap') as tap, patch.object(bot, 'task_screen', return_value=frame),
               patch.object(bot, 'island_page', return_value=True), contextlib.redirect_stdout(io.StringIO())):
             bot.collect_crystals('test', frame, None)
@@ -355,7 +378,52 @@ class ScheduleTest(unittest.TestCase):
               contextlib.redirect_stdout(io.StringIO()) as output):
             self.assertEqual(bot.retry_once('生命结晶', operation, 'test', None, None), 'ok')
         self.assertEqual(attempts, [100, 110])
-        self.assertIn('首次异常：临时画面；10 秒后第 1 次重试', output.getvalue())
+        self.assertIn('首次异常：临时画面；10 秒后进行第 1 次重试', output.getvalue())
+        self.assertIn('第 1 次重试：开始重试', output.getvalue())
+
+    def test_retry_logs_city_recovery_before_retrying(self):
+        clock, attempts, recoveries = Clock(), [], []
+        def operation():
+            attempts.append(clock.now)
+            if len(attempts) == 1:
+                raise RuntimeError('临时画面')
+            return 'ok'
+        def recover():
+            recoveries.append(clock.now)
+        with (patch.object(bot.time, 'sleep', clock.sleep),
+              patch.object(bot, 'screenshot', return_value=Image.new('L', (1, 1))),
+              patch.object(bot, 'forced_offline', return_value=False),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(bot.retry_once('联盟互助监控', operation, 'test', None, None,
+                                            recover), 'ok')
+        self.assertEqual(attempts, [100, 110])
+        self.assertEqual(recoveries, [110])
+        self.assertIn('10 秒后尝试恢复主城并重试（第 1 次）', output.getvalue())
+        self.assertIn('第 1 次重试：正在恢复主城', output.getvalue())
+        self.assertIn('第 1 次重试：主城恢复完成，开始重试', output.getvalue())
+
+    def test_return_to_city_reports_progress_and_uses_wall_clock_timeout(self):
+        clock = Clock()
+        frame = Image.new('L', (1080, 2340))
+        with (patch.object(bot.time, 'monotonic', clock.monotonic),
+              patch.object(bot.time, 'sleep', clock.sleep),
+              patch.object(bot, 'screenshot', return_value=frame),
+              patch.object(bot, 'forced_offline', return_value=False),
+              patch.object(bot, 'inspect', return_value=(False, None, 62.8)),
+              patch.object(bot, 'reconnect_popup_target', return_value=None),
+              patch.object(bot, 'pet_page', return_value=False),
+              patch.object(bot, 'pet_reward_page', return_value=False),
+              patch.object(bot, 'stamina_page', return_value=False),
+              patch.object(bot, 'warehouse_reward_timer', return_value=(False, None)),
+              patch.object(bot, 'recruit_hero_exit_page', return_value=False),
+              patch.object(bot, 'chat_page', return_value=False),
+              patch.object(bot, 'island_page', return_value=False),
+              patch.object(bot, 'town_button', return_value=False),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            with self.assertRaisesRegex(RuntimeError, '60 秒内仍未确认主城'):
+                bot.return_to_city('test', None, None, None, None)
+        self.assertEqual(clock.now, 160)
+        self.assertIn('正在恢复主城，已等待 10/60 秒，底栏差异 62.8', output.getvalue())
 
     def test_three_retries_exhaust_with_task_name(self):
         clock, attempts = Clock(), []
@@ -647,10 +715,10 @@ class ScheduleTest(unittest.TestCase):
         self.assertIsNone(bot.warehouse_countdown(ready, offset=offset))
         self.assertEqual(bot.warehouse_countdown(claimed, offset=offset), 1464)
         timers = {'warehouse': 5000}
-        screens = [away, away, claimed, ready, frame('flow-warehouse-can-click'), claimed]
+        screens = [ready, frame('flow-warehouse-can-click'), claimed]
         with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
               patch.object(bot, 'task_page', return_value=False),
-              patch.object(bot, 'reset_drawer', return_value=away) as reset,
+              patch.object(bot, 'warehouse_drawer_entry', return_value=(away, 850)) as locate,
               patch.object(bot, 'task_screen', side_effect=screens),
               patch.object(bot, 'game_foreground', return_value=True),
               patch.object(bot, 'adb') as adb, patch.object(bot, 'task_tap') as tap,
@@ -658,12 +726,13 @@ class ScheduleTest(unittest.TestCase):
               contextlib.redirect_stdout(io.StringIO()) as output):
             result = bot.run_stamina('test', None, None, None, timers, initial_image=away)
         self.assertIs(result, claimed)
-        reset.assert_called_once()
-        self.assertEqual(adb.call_count, 2)
+        locate.assert_called_once()
+        adb.assert_not_called()  # No blind city swipes or barracks navigation.
+        self.assertEqual(tap.call_args_list[0].args, ('test', 608, 850))
         self.assertEqual(tap.call_args_list[-1].args, ('test', 530, 1700))
-        self.assertEqual(timers, {'warehouse': 5000, 'stamina': 1564})
+        self.assertEqual(timers, {'warehouse': 5000, 'stamina': 11127})
         self.assertIn('已领取体力罐头', output.getvalue())
-        self.assertIn('体力罐头复查（仓库计时） 倒计时 1464 秒，预计完成时间', output.getvalue())
+        self.assertIn('体力罐头 倒计时 11027 秒，预计完成时间', output.getvalue())
 
     def test_stamina_cooldown_unknown_timer_and_modal_guard(self):
         claimed = Image.open(bot.ROOT / 'artifacts/stamina-claimed.png').convert('RGB')
@@ -680,7 +749,7 @@ class ScheduleTest(unittest.TestCase):
                   contextlib.redirect_stdout(io.StringIO())):
                 bot.run_stamina('test', None, None, None, timers, initial_image=claimed)
             tap.assert_not_called()
-            self.assertEqual(timers, {'warehouse': 5000, 'stamina': 400 if seconds else 160})
+            self.assertEqual(timers, {'warehouse': 5000, 'stamina': 160})
         with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
               patch.object(bot, 'task_page', return_value=False),
               patch.object(bot, 'task_screen', return_value=claimed),

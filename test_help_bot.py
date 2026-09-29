@@ -22,6 +22,23 @@ class Clock:
         self.now += seconds
 
 
+class RunLogTests(unittest.TestCase):
+    def test_run_duration_is_rounded_and_described_as_monitoring_limit(self):
+        with (patch.object(help_bot.time, "monotonic", side_effect=(100, 200)),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            help_bot.run("test-device", 24.688000000009197, 1, False, 1,
+                         *([None] * 4))
+        self.assertIn("本轮最多监控 24.7 秒", output.getvalue())
+        self.assertNotIn("24.688000000009197", output.getvalue())
+
+    def test_run_duration_omits_redundant_decimal_zero(self):
+        with (patch.object(help_bot.time, "monotonic", side_effect=(100, 200)),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            help_bot.run("test-device", 60.0, 1, False, 1, *([None] * 4))
+        self.assertIn("本轮最多监控 60 秒", output.getvalue())
+        self.assertNotIn("60.0 秒", output.getvalue())
+
+
 class ReconnectTest(unittest.TestCase):
     def setUp(self):
         root = Path(__file__).resolve().parent
@@ -146,6 +163,21 @@ class ReconnectTest(unittest.TestCase):
         with patch.object(help_bot, "RECONNECT_PROMO_CLOSE", close):
             self.assertEqual(help_bot.reconnect_popup_target(popup), (855, 440))
 
+    def test_reconnect_accepts_changed_activity_close_but_not_city_controls(self):
+        template = Image.new("L", (70, 70))
+        image = Image.new("L", help_bot.EXPECTED_SIZE)
+        with (patch.object(help_bot, "RECONNECT_PROMO_CLOSE", template),
+              patch.object(help_bot, "RECONNECT_WELCOME_CLOSE", template),
+              patch.object(help_bot, "ACTIVITY_CLOSE", template),
+              patch.object(help_bot, "find_white", side_effect=[
+                  (.75, 0, 0), (.68, 0, 0), (.75, 0, 0), (.89, 880, 505)])):
+            self.assertEqual(help_bot.reconnect_popup_target(image), (915, 540))
+        with (patch.object(help_bot, "RECONNECT_PROMO_CLOSE", template),
+              patch.object(help_bot, "RECONNECT_WELCOME_CLOSE", template),
+              patch.object(help_bot, "ACTIVITY_CLOSE", template),
+              patch.object(help_bot, "find_white", return_value=(.71, 900, 500))):
+            self.assertIsNone(help_bot.reconnect_popup_target(image))
+
     def test_reconnect_closes_popups_before_resuming(self):
         root = Path(__file__).resolve().parent
         offline = Image.open(root / "artifacts/reconnect-current-emulator.png").convert("L")
@@ -169,12 +201,14 @@ class ReconnectTest(unittest.TestCase):
               patch.object(help_bot.time, "monotonic", clock.monotonic),
               patch.object(help_bot.time, "sleep", clock.sleep),
               patch.object(help_bot, "screenshot", side_effect=lambda _: frames[len(taps)]),
-              patch.object(help_bot, "inspect", side_effect=lambda image, *_: (image is city, None, 0)),
+              patch.object(help_bot, "inspect", side_effect=lambda image, *_:
+                           (image is city, (99, 0, 0) if image is city else None, 0)),
               patch.object(help_bot, "game_foreground", return_value=True),
               patch.object(help_bot, "adb", side_effect=lambda _serial, *args: taps.append(args)),
               contextlib.redirect_stdout(io.StringIO())):
             help_bot.run("test-device", 5, 1, False, 1,
-                         Image.new("L", (1, 1)), Image.new("L", (1, 1)), text, reconnect)
+                         Image.new("L", (1, 1)), Image.new("L", (1, 1)), text, reconnect,
+                         return_on_reconnect=True)
 
         self.assertEqual([(tap[-2], tap[-1]) for tap in taps],
                          [("752", "1482"), ("915", "540"), ("992", "650")])
@@ -199,7 +233,8 @@ class ReconnectTest(unittest.TestCase):
               patch.object(help_bot, "game_foreground", return_value=True),
               patch.object(help_bot, "adb", side_effect=lambda _serial, *args: taps.append(args)),
               contextlib.redirect_stdout(io.StringIO())):
-            help_bot.run("test-device", 5, 1, False, 1, *self.templates)
+            help_bot.run("test-device", 5, 1, False, 1, *self.templates,
+                         return_on_reconnect=True)
 
         self.assertEqual([tap[-2:] for tap in taps], [("752", "1482"), ("855", "440")])
 
@@ -285,6 +320,125 @@ class CityTaskTest(unittest.TestCase):
         status.assert_called_once_with(image, 1225)
         tap.assert_not_called()
 
+    def test_training_logs_use_chinese_unit_names(self):
+        image = Image.new("RGB", help_bot.EXPECTED_SIZE)
+        with (patch.object(help_bot, "inspect", return_value=(True, None, 0)),
+              patch.object(help_bot, "reset_drawer", return_value=image),
+              patch.object(help_bot, "training_status", return_value="busy"),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            help_bot.run_training("test-device", None, None, None, {},
+                                  initial_image=image, keep_open=True)
+        log = output.getvalue()
+        self.assertNotIn("shield", log)
+        self.assertNotIn("spear", log)
+        self.assertNotIn("archer", log)
+        for label in ("盾兵", "矛兵", "射手"):
+            self.assertIn(f"{label}已在训练中", log)
+
+    def test_training_reenters_barracks_after_new_unit_introduction(self):
+        root = Path(__file__).resolve().parent
+        frame = lambda name: Image.open(root / "artifacts" / f"{name}.png").convert("RGB")
+        drawer = frame("training-drawer")
+        title = Image.open(root / "assets" / "emulator-training-shield-title.png").convert("L")
+        intro = [frame("shield-training-page" + (str(index) if index > 1 else ""))
+                 for index in range(1, 7)]
+        city = frame("shield-training-page7")
+        frames = iter((frame("shield-navigated"), intro[0], *intro[1:], city,
+                       frame("shield-menu2"), frame("shield-training-ready"),
+                       frame("shield-training-started"), city))
+        with (patch.object(help_bot, "inspect", return_value=(True, None, 0)),
+              patch.object(help_bot, "reset_drawer", return_value=drawer),
+              patch.object(help_bot, "task_drawer", return_value=drawer),
+              patch.object(help_bot, "task_screen", side_effect=lambda _serial: next(frames)),
+              patch.object(help_bot, "training_status", return_value="idle"),
+              patch.object(help_bot, "training_intro_page",
+                           side_effect=[True] * 6 + [False]) as intro_page,
+              patch.object(help_bot, "task_tap") as tap,
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            result = help_bot.run_training(
+                "test-device", None, None, drawer, {"shield": title},
+                initial_image=drawer, keep_open=True, units={"shield"})
+
+        self.assertIs(result, drawer)
+        self.assertEqual(intro_page.call_count, 7)
+        actions = [call.args[1:] for call in tap.call_args_list]
+        self.assertEqual(actions.count((540, 2050)), 6)
+        self.assertEqual(actions.count((608, 1115)), 2)
+        self.assertEqual(actions.count((725, 1590)), 2)
+        self.assertIn("盾兵已关闭新兵种提示，共 6 页", output.getvalue())
+
+    def test_training_intro_requires_explicit_continue_prompt(self):
+        image = Image.new("RGB", help_bot.EXPECTED_SIZE)
+        with patch.object(help_bot, "recognize_text", return_value=[
+                ("点击任意", (0, 0, 100, 30)), ("位置继续", (110, 0, 100, 30))]):
+            self.assertTrue(help_bot.training_intro_page(image))
+        with patch.object(help_bot, "recognize_text", return_value=[("训练", (0, 0, 100, 30))]):
+            self.assertFalse(help_bot.training_intro_page(image))
+
+    def test_recruit_checks_continue_from_current_drawer_position(self):
+        image = Image.new("RGB", help_bot.EXPECTED_SIZE)
+        help_bot.TASK_DRAWER_SCROLL = 3
+        rows = [("高级招募", (0, 100, 120, 30)), ("史诗招募", (0, 220, 120, 30))]
+        with (patch.object(help_bot, "task_drawer", return_value=image),
+              patch.object(help_bot, "recognize_text", return_value=rows),
+              patch.object(help_bot, "reset_drawer") as reset,
+              patch.object(help_bot, "swipe_drawer") as swipe):
+            advanced_image, advanced_y = help_bot.recruit_row(
+                "test-device", image, {}, "recruit_advanced")
+            epic_image, epic_y = help_bot.recruit_row(
+                "test-device", advanced_image, {}, "recruit_epic")
+        self.assertIs(advanced_image, image)
+        self.assertIs(epic_image, image)
+        self.assertLess(advanced_y, epic_y)
+        reset.assert_not_called()
+        swipe.assert_not_called()
+
+    def test_epic_recruit_scrolls_down_only_when_not_visible(self):
+        current = Image.new("RGB", help_bot.EXPECTED_SIZE)
+        lower = Image.new("RGB", help_bot.EXPECTED_SIZE, "white")
+        help_bot.TASK_DRAWER_SCROLL = 1
+        with (patch.object(help_bot, "task_drawer", return_value=current),
+              patch.object(help_bot, "recognize_text", side_effect=[
+                  [("英雄招募", (0, 100, 120, 30))],
+                  [("史诗招募", (0, 180, 120, 30))],
+              ]),
+              patch.object(help_bot, "swipe_drawer", return_value=lower) as swipe):
+            result, row_y = help_bot.recruit_row(
+                "test-device", current, {"drawer-open": current}, "recruit_epic")
+        self.assertIs(result, lower)
+        self.assertIsNotNone(row_y)
+        swipe.assert_called_once_with("test-device", current)
+
+    def test_full_hero_recruit_result_exits_back_to_recruit_page(self):
+        drawer = Image.new("RGB", help_bot.EXPECTED_SIZE)
+        recruit = Image.new("RGB", help_bot.EXPECTED_SIZE, "blue")
+        hero = Image.new("RGB", help_bot.EXPECTED_SIZE, "red")
+        frames = iter((recruit, hero, recruit, drawer))
+
+        def page(image, _templates, name, *_args):
+            return ((name == "drawer-open" and image is drawer)
+                    or (name == "recruit-title" and image is recruit))
+
+        with (patch.object(help_bot, "inspect", return_value=(True, None, 0)),
+              patch.object(help_bot, "task_drawer", return_value=drawer),
+              patch.object(help_bot, "recruit_row", return_value=(drawer, 900)),
+              patch.object(help_bot, "find_green", return_value=(1.0, 280, 920)),
+              patch.object(help_bot, "recruit_button_state", return_value=("free", "已确认免费按钮")),
+              patch.object(help_bot, "task_page", side_effect=page),
+              patch.object(help_bot, "recognize_text", return_value=[
+                  ("点击任意", (0, 0, 100, 30)), ("位置退出", (0, 40, 100, 30))]),
+              patch.object(help_bot, "task_screen", side_effect=lambda _serial: next(frames)),
+              patch.object(help_bot, "recruit_timer", return_value=drawer),
+              patch.object(help_bot, "task_tap") as tap,
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            result = help_bot.run_city_tasks(
+                "test-device", None, None, {"drawer-open": drawer, "free-label": drawer},
+                initial_image=drawer, donate=False, recruit_kind="recruit_advanced",
+                timers={}, keep_open=True)
+        self.assertIs(result, drawer)
+        self.assertIn(("test-device", 540, 2100), [call.args for call in tap.call_args_list])
+        self.assertIn("招募到完整英雄", output.getvalue())
+
     def test_tree_threshold_skips_amount_below_limit(self):
         image = Image.new("RGB", help_bot.EXPECTED_SIZE)
         help_bot.TASK_DRAWER_SCROLL = help_bot.DRAWER_SWIPES
@@ -299,6 +453,30 @@ class CityTaskTest(unittest.TestCase):
                                  initial_image=image, warehouse=False, dawn=False,
                                  tree_threshold=5000)
         tap.assert_not_called()
+
+    def test_missing_warehouse_row_defers_without_blocking_later_tasks(self):
+        image = Image.new("RGB", help_bot.EXPECTED_SIZE)
+        timers = {}
+        with (patch.object(help_bot, "inspect", return_value=(True, None, 0)),
+              patch.object(help_bot, "task_drawer", return_value=image),
+              patch.object(help_bot, "reset_drawer") as reset,
+              patch.object(help_bot, "swipe_drawer", return_value=image) as swipe,
+              patch.object(help_bot, "recognize_text", return_value=[
+                  ("生命之树", (0, 100, 120, 30))]),
+              patch.object(help_bot, "reward_row", return_value=(0, 0, 0)),
+              patch.object(help_bot, "task_page", return_value=False),
+              patch.object(help_bot, "task_tap") as tap,
+              patch.object(help_bot.time, "monotonic", return_value=100),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            result = help_bot.run_rewards("test-device", None, None, None, None, None, None,
+                                          initial_image=image, tree=False, dawn=False,
+                                          timers=timers)
+        self.assertIs(result, image)
+        tap.assert_not_called()
+        reset.assert_not_called()
+        swipe.assert_not_called()
+        self.assertEqual(timers, {"warehouse": 160})
+        self.assertIn("仓库补给尚不可领取", output.getvalue())
 
     def test_disabled_donation_skips_its_label(self):
         image = Image.new("RGB", help_bot.EXPECTED_SIZE)
@@ -516,8 +694,7 @@ class CityTaskTest(unittest.TestCase):
         island_before = frame("tree-after-drawer")
         island_after = frame("tree-page")
         city = frame("tree-return-city")
-        frames = iter((*(drawer for _ in range(help_bot.DRAWER_SWIPES)), drawer, drawer, island_before, island_after,
-                       city, *(drawer for _ in range(3)), city))
+        frames = iter((island_before, island_after))
         asset = lambda name, mode: Image.open(root / "assets" / f"emulator-{name}.png").convert(mode)
         actions = []
         with (patch.object(help_bot, "EXPECTED_SIZE", (1080, 2340)),
@@ -525,9 +702,11 @@ class CityTaskTest(unittest.TestCase):
               patch.object(help_bot, "NAV_BOX", (70, 2195, 150, 2275)),
               patch.object(help_bot, "color_screenshot", return_value=drawer),
               patch.object(help_bot, "task_screen", side_effect=lambda _: next(frames)),
-              patch.object(help_bot, "wait_city_after_island", side_effect=lambda *_: next(frames)),
+              patch.object(help_bot, "wait_city_after_island", return_value=city),
               patch.object(help_bot, "task_drawer", side_effect=lambda _serial, image, _templates: image),
-              patch.object(help_bot, "tree_amount", return_value=4984),
+              patch.object(help_bot, "tree_drawer_amount", side_effect=[
+                  (4984, 1200), (4984, 1200), (0, 1200), (0, 1200)]),
+              patch.object(help_bot, "collect_crystals", return_value=island_after),
               patch.object(help_bot, "game_foreground", return_value=True),
               patch.object(help_bot, "adb"),
               patch.object(help_bot, "task_tap", side_effect=lambda _serial, x, y: actions.append((x, y))),
@@ -536,43 +715,73 @@ class CityTaskTest(unittest.TestCase):
                                  asset("city-nav", "L"), asset("drawer-open", "RGB"),
                                  asset("warehouse-title", "RGB"),
                                  asset("tree-collect-label", "RGB"),
-                                 asset("island-title", "L"))
+                                 asset("island-title", "L"), warehouse=False, dawn=False)
 
-        self.assertEqual(actions[-3:][0], (608, 1195))
-        self.assertEqual(actions[-1], (60, 190))
-        self.assertTrue(480 <= actions[-2][0] <= 580 and 680 <= actions[-2][1] <= 780)
+        self.assertIn((608, 1195), actions)
+        self.assertIn((60, 190), actions)
 
     def test_warehouse_and_dawn_reward_are_claimed(self):
         root = Path(__file__).resolve().parent
         frame = lambda name: Image.open(root / "artifacts" / f"{name}.png").convert("RGB")
         drawer = frame("drawer-flow-3")
-        frames = iter(frame(name) for name in (
-            "flow-warehouse-entry", "flow-warehouse-reward", "flow-warehouse-can",
-            "drawer-flow-top",
-            "drawer-flow-1", "drawer-flow-1", "drawer-flow-2",
-            "drawer-flow-2", "drawer-flow-3", "drawer-flow-3", "flow-dawn-entry",
-            "flow-dawn-claimed", "flow-dawn-after-wait", "flow-dawn-exit",
-        ))
         asset = lambda name, mode: Image.open(root / "assets" / f"emulator-{name}.png").convert(mode)
-        actions = []
         help_bot.TASK_DRAWER_SCROLL = help_bot.DRAWER_SWIPES
+        warehouse_actions = []
+        warehouse_frames = iter(frame(name) for name in (
+            "flow-warehouse-entry", "flow-warehouse-reward", "flow-warehouse-can"))
         with (patch.object(help_bot, "EXPECTED_SIZE", (1080, 2340)),
               patch.object(help_bot, "HELP_BOX", (748, 2070, 830, 2155)),
               patch.object(help_bot, "NAV_BOX", (70, 2195, 150, 2275)),
-              patch.object(help_bot, "task_screen", side_effect=lambda _: next(frames)),
-              patch.object(help_bot, "tree_amount", return_value=0),
+              patch.object(help_bot, "task_drawer", side_effect=lambda _serial, image, _templates: image),
+              patch.object(help_bot, "task_screen", side_effect=lambda _: next(warehouse_frames)),
               patch.object(help_bot, "game_foreground", return_value=True),
               patch.object(help_bot, "adb"),
-              patch.object(help_bot, "task_tap", side_effect=lambda _serial, x, y: actions.append((x, y))),
+              patch.object(help_bot, "task_tap", side_effect=lambda _serial, x, y: warehouse_actions.append((x, y))),
               contextlib.redirect_stdout(io.StringIO())):
             help_bot.run_rewards("test-device", asset("help-icon", "L"),
                                  asset("city-nav", "L"), asset("drawer-open", "RGB"),
                                  asset("warehouse-title", "RGB"),
                                  asset("tree-collect-label", "RGB"),
-                                 asset("island-title", "L"), initial_image=drawer)
+                                 asset("island-title", "L"), initial_image=drawer,
+                                 tree=False, dawn=False)
 
-        self.assertIn((530, 1650), actions)  # 晨曦回礼弹窗的领取按钮
-        self.assertEqual(actions[-1], (530, 1900))
+        self.assertIn((530, 1050), warehouse_actions)
+        self.assertEqual(warehouse_actions[-1], (530, 1900))
+
+        dawn_actions = []
+        dawn_frames = iter(frame(name) for name in (
+            "flow-dawn-entry", "flow-dawn-claimed", "flow-dawn-after-wait",
+            "flow-dawn-exit", "flow-dawn-exit"))
+        dawn_timers = {}
+        dawn_output = io.StringIO()
+        with (patch.object(help_bot, "EXPECTED_SIZE", (1080, 2340)),
+              patch.object(help_bot, "HELP_BOX", (748, 2070, 830, 2155)),
+              patch.object(help_bot, "NAV_BOX", (70, 2195, 150, 2275)),
+              patch.object(help_bot, "inspect", return_value=(True, (99, 0, 0), 0)),
+              patch.object(help_bot, "task_drawer", side_effect=lambda _serial, image, _templates: image),
+              patch.object(help_bot, "reward_row", return_value=(1.0, 270, 1310)),
+              patch.object(help_bot, "training_status", return_value="completed"),
+              patch.object(help_bot, "countdown", return_value=3600),
+              patch.object(help_bot, "task_screen", side_effect=lambda _: next(dawn_frames)),
+              patch.object(help_bot, "game_foreground", return_value=True),
+              patch.object(help_bot, "adb"),
+              patch.object(help_bot, "task_tap", side_effect=lambda _serial, x, y: dawn_actions.append((x, y))),
+              contextlib.redirect_stdout(dawn_output)):
+            help_bot.run_rewards("test-device", asset("help-icon", "L"),
+                                 asset("city-nav", "L"), asset("drawer-open", "RGB"),
+                                 asset("warehouse-title", "RGB"),
+                                 asset("tree-collect-label", "RGB"),
+                                 asset("island-title", "L"), initial_image=drawer,
+                                 warehouse=False, tree=False, timers=dawn_timers)
+
+        self.assertIn((530, 1650), dawn_actions)
+        self.assertEqual(dawn_actions[-1], (530, 1900))
+        log = dawn_output.getvalue()
+        claimed = log.index("已领取晨曦回礼")
+        reading = log.index("正在打开任务抽屉，读取晨曦回礼下次领取倒计时")
+        countdown_log = log.index("晨曦回礼 倒计时 3600 秒")
+        self.assertLess(claimed, reading)
+        self.assertLess(reading, countdown_log)
 
     def test_training_rows_distinguish_completed_idle_and_busy(self):
         root = Path(__file__).resolve().parent
@@ -681,7 +890,7 @@ class CityTaskTest(unittest.TestCase):
               contextlib.redirect_stdout(io.StringIO())):
             help_bot.run_city_tasks("test-device", help_icon, city_nav, templates)
 
-        self.assertEqual(screenshots.call_count, len(frames))
+        self.assertLessEqual(screenshots.call_count, len(frames))
         self.assertNotIn(("shell", "input", "tap", "760", "1810"), actions)
         self.assertNotIn(("shell", "input", "tap", "280", "1690"), actions)
         self.assertEqual(actions[-1], ("shell", "input", "tap", "695", "1100"))

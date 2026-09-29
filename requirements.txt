@@ -1,0 +1,4 @@
+Pillow>=10,<12
+pyobjc-core; sys_platform == "darwin"
+pyobjc-framework-Cocoa; sys_platform == "darwin"
+rapidocr-onnxruntime==1.4.4; sys_platform == "win32"
