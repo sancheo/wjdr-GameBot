@@ -25,26 +25,7 @@
 | Android Studio | 安装和管理安卓模拟器，同时提供程序连接模拟器所需的 ADB 工具 | [Android Studio 官网](https://developer.android.com/studio) |
 | 《无尽冬日》国服 | GameBot 要操作的游戏 | 安装到 Android Studio 创建的模拟器中 |
 
-### Android 模拟器和 Platform Tools 要不要单独安装？
 
-一般**不需要另外下载安装包**。安装 Android Studio 后，可以在 Android Studio 里面安装这两个组件：
-
-- **Android Emulator**：安卓模拟器本体，用来运行游戏。
-- **Android SDK Platform-Tools**：包含 `adb`。GameBot 依靠 `adb` 获取游戏画面并执行点击。
-
-它们是 Android Studio 管理的组件，并不代表装完 Android Studio 就一定已经下载完成。请按照下方第 2 步检查这两个组件是否已勾选并安装。
-
-### “项目依赖”是什么？需要自己寻找吗？
-
-不需要。项目依赖不是另一个需要手工寻找的软件，而是 GameBot 使用的 Python 功能包：
-
-- Pillow：读取和比较游戏截图。
-- RapidOCR：Windows 上识别截图中的中文和倒计时。
-- PyObjC：macOS 上调用系统自带的文字识别功能。
-
-这些内容已经写在项目的 `requirements.txt` 文件中。后面只需要复制执行一条安装命令，系统会自动选择并下载当前电脑需要的内容。第一次安装依赖时需要联网，游戏截图只在本机处理，不会上传。
-
-Git 不是必需软件。如果拿到的是项目文件夹或压缩包，不用安装 Git。
 
 ## 安装与环境配置
 
