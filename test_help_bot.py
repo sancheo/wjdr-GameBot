@@ -201,7 +201,7 @@ class ReconnectTest(unittest.TestCase):
               patch.object(help_bot.time, "monotonic", clock.monotonic),
               patch.object(help_bot.time, "sleep", clock.sleep),
               patch.object(help_bot, "screenshot", side_effect=lambda _: frames[len(taps)]),
-              patch.object(help_bot, "inspect", side_effect=lambda image, *_:
+              patch.object(help_bot, "inspect", side_effect=lambda image, *_, **kwargs:
                            (image is city, (99, 0, 0) if image is city else None, 0)),
               patch.object(help_bot, "game_foreground", return_value=True),
               patch.object(help_bot, "adb", side_effect=lambda _serial, *args: taps.append(args)),
@@ -727,13 +727,15 @@ class CityTaskTest(unittest.TestCase):
         asset = lambda name, mode: Image.open(root / "assets" / f"emulator-{name}.png").convert(mode)
         help_bot.TASK_DRAWER_SCROLL = help_bot.DRAWER_SWIPES
         warehouse_actions = []
+        warehouse_timers = {"stamina": 9000}
         warehouse_frames = iter(frame(name) for name in (
             "flow-warehouse-entry", "flow-warehouse-reward", "flow-warehouse-can"))
         with (patch.object(help_bot, "EXPECTED_SIZE", (1080, 2340)),
               patch.object(help_bot, "HELP_BOX", (748, 2070, 830, 2155)),
               patch.object(help_bot, "NAV_BOX", (70, 2195, 150, 2275)),
-              patch.object(help_bot, "task_drawer", side_effect=lambda _serial, image, _templates: image),
+              patch.object(help_bot, "task_drawer", side_effect=lambda _serial, image, _templates: image) as open_drawer,
               patch.object(help_bot, "task_screen", side_effect=lambda _: next(warehouse_frames)),
+              patch.object(help_bot.time, "monotonic", return_value=100),
               patch.object(help_bot, "game_foreground", return_value=True),
               patch.object(help_bot, "adb"),
               patch.object(help_bot, "task_tap", side_effect=lambda _serial, x, y: warehouse_actions.append((x, y))),
@@ -743,8 +745,10 @@ class CityTaskTest(unittest.TestCase):
                                  asset("warehouse-title", "RGB"),
                                  asset("tree-collect-label", "RGB"),
                                  asset("island-title", "L"), initial_image=drawer,
-                                 tree=False, dawn=False)
+                                 tree=False, dawn=False, timers=warehouse_timers, keep_open=True)
 
+        open_drawer.assert_called_once()
+        self.assertEqual(warehouse_timers, {"stamina": 9000, "warehouse": 1299})
         self.assertIn((530, 1050), warehouse_actions)
         self.assertEqual(warehouse_actions[-1], (530, 1900))
 

@@ -10,7 +10,7 @@ import threading
 import tkinter as tk
 from collections import OrderedDict
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 from PIL import Image, ImageDraw, ImageTk
 
 from platform_support import SUBPROCESS_OPTIONS, resolve_adb
@@ -77,6 +77,7 @@ TASKS = (
     ("explore", "自动领取探险经验"),
     ("donate", "自动捐献"),
     ("recruit", "自动免费招募"),
+    ("treasure", "宠物寻宝"),
     ("warehouse", "自动领取仓库补给"),
     ("tree", "自动收集生命结晶"),
     ("dawn", "自动收集晨曦回礼"),
@@ -84,6 +85,7 @@ TASKS = (
     ("reconnect", "强制下线后自动重连"),
 )
 UNITS = (("shield", "盾兵"), ("spear", "矛兵"), ("archer", "射手"))
+RESOURCES = (("meat", "生肉"), ("wood", "木材"), ("coal", "煤矿"), ("iron", "铁矿"))
 
 
 def discover_emulators():
@@ -163,7 +165,7 @@ class Switch(tk.Canvas):
 
 
 class HintEntry(tk.Canvas):
-    def __init__(self, parent, initial, hint):
+    def __init__(self, parent, initial, hint, minimum=1):
         super().__init__(parent, height=38, bg=WHITE, bd=0, highlightthickness=0)
         self.value = tk.StringVar(value=initial)
         self.entry = tk.Entry(self, textvariable=self.value, bg=FIELD, fg=TEXT, bd=0,
@@ -175,6 +177,7 @@ class HintEntry(tk.Canvas):
         self.entry.bind("<Button-1>", self.click, add="+")
         self.enabled = True
         self.hint = hint
+        self.minimum = float(minimum)
         self.pressed_step = 0
         self.press_timer = None
         self.value.trace_add("write", lambda *_: self.draw())
@@ -219,7 +222,7 @@ class HintEntry(tk.Canvas):
             current = float(self.get())
         except ValueError:
             current = 1.0
-        value = max(1.0, current + change)
+        value = max(self.minimum, current + change)
         self.value.set(str(int(value)) if value.is_integer() else str(value))
         return "break"
 
@@ -255,7 +258,8 @@ class DevicePicker(tk.Canvas):
         # Native combobox owns popup mapping, mouse grabs and focus transitions.
         # A borderless Toplevel/Listbox can lose focus while Windows maps it.
         style = ttk.Style(self)
-        style.configure("Device.TCombobox", font=(UI_FONT, 12), padding=(8, 4))
+        style.configure("Device.TCombobox", font=(UI_FONT, 12),
+                        padding=(8, 0 if sys.platform == "darwin" else 4))
         self.combo = ttk.Combobox(self, textvariable=variable, state="disabled",
                                   style="Device.TCombobox", font=(UI_FONT, 12), height=6)
         self.combo_window = self.create_window(0, 0, anchor="nw", window=self.combo)
@@ -274,7 +278,9 @@ class DevicePicker(tk.Canvas):
         self.combo.configure(state="readonly" if enabled else "disabled")
 
     def draw(self):
-        self.itemconfigure(self.combo_window, width=max(self.winfo_width(), 80), height=36)
+        height = self.combo.winfo_reqheight() if sys.platform == "darwin" else 36
+        self.coords(self.combo_window, 0, (36 - height) // 2)
+        self.itemconfigure(self.combo_window, width=max(self.winfo_width(), 80), height=height)
 
     def close_menu(self, _event=None):
         self.tk.call("ttk::combobox::Unpost", self.combo)
@@ -329,6 +335,9 @@ def image_label(parent, name, size, background):
 
 
 def badge(parent, symbol, size=34, background=WHITE):
+    if symbol == "info":
+        text = parent.grid_slaves(row=0, column=0)[0]
+        size = tkfont.Font(root=parent, font=text.cget("font")).metrics("linespace")
     return image_label(parent, f"ui/{symbol}.png", size, background)
 
 
@@ -411,13 +420,19 @@ class BotWindow:
         root.iconphoto(True, self.app_icon)
         if sys.platform == "darwin":
             try:
-                from AppKit import NSApplication, NSImage
-                NSApplication.sharedApplication().setApplicationIconImage_(
+                from AppKit import NSApplication, NSAppearance, NSAppearanceNameAqua, NSImage
+                application = NSApplication.sharedApplication()
+                application.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameAqua))
+                application.setApplicationIconImage_(
                     NSImage.alloc().initWithContentsOfFile_(str(icon_path)))
             except ImportError:
                 pass
         self.options = {name: tk.BooleanVar(value=True) for name, _ in (*TASKS, *UNITS)}
         self.options["train"] = tk.BooleanVar(value=True)
+        self.options["upgrade"] = tk.BooleanVar(value=False)
+        for name in ("intelligence", "gather", *(name for name, _ in RESOURCES)):
+            self.options[name] = tk.BooleanVar(value=True)
+        self.options["bounty"] = tk.BooleanVar(value=False)
         self.device = tk.StringVar()
         self.device_lookup = {}
         self.device_results = queue.Queue()
@@ -499,28 +514,53 @@ class BotWindow:
         for column in range(3):
             cards.grid_columnconfigure(column, weight=1, uniform="cards")
         daily_card, daily = self.card(cards, "日常任务", "calendar")
-        daily_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        daily_card.grid(row=0, column=0, sticky="new", padx=(0, 6), pady=(0, 10))
         for name, label in (("help", "联盟互助"), ("explore", "探险经验"),
+                            ("donate", "联盟捐献"), ("recruit", "免费招募"),
+                            ("treasure", "宠物寻宝"),
                             ("warehouse", "仓库补给"), ("dawn", "晨曦回礼"), ("pet", "宠物技能")):
             self.option_row(daily, name, label)
 
-        training_card, training = self.card(cards, "练兵与联盟", "people")
-        training_card.grid(row=0, column=1, sticky="nsew", padx=6)
+        training_card, training = self.card(cards, "练兵任务", "people")
+        training_card.grid(row=0, column=1, sticky="new", padx=6)
         self.option_row(training, "train", "自动练兵", self.training_changed)
+        self.option_row(training, "upgrade", "兵种升级", indent=True,
+                        hint="开启后不再训练新兵而是将低级兵种升到当前最高级")
         for name, label in UNITS:
             self.option_row(training, name, label, indent=True)
-        self.option_row(training, "donate", "联盟捐献")
-        self.option_row(training, "recruit", "免费招募")
 
         connection_card, connection = self.card(cards, "结晶与连接", "diamond")
-        connection_card.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
+        connection_card.grid(row=0, column=2, sticky="new", padx=(6, 0))
         self.option_row(connection, "tree", "自动收集生命结晶", self.dependent_changed)
         self.threshold_entry = self.input_row(connection, "收集阈值 · 大于 0", "1000", "阈值必须大于 0")
         self.option_row(connection, "reconnect", "强制下线后自动重连", self.dependent_changed)
         self.reconnect_entry = self.input_row(connection, "点击重连前等待 · 分钟", "10", "等待时间必须大于 0")
 
-        self.task_cards = (daily_card, training_card, connection_card)
+        wilderness_card, wilderness = self.card(cards, "野外任务", "intelligence")
+        wilderness_card.grid(row=1, column=0, sticky="new", padx=(0, 6))
+        self.option_row(wilderness, "intelligence", "灯塔情报", self.wilderness_changed)
+        self.option_row(wilderness, "bounty", "大师悬赏", indent=True)
+        self.stamina_entry = self.input_row(
+            wilderness, "体力触发阈值", "0", "阈值必须大于或等于 0", minimum=0,
+            tooltip="值为0时不限制，非0时判断体力大于该值时才执行操作")
+        self.option_row(wilderness, "gather", "资源采集", self.wilderness_changed)
+        resources = tk.Frame(wilderness, bg=WHITE)
+        resources.pack(fill="x", padx=(18, 0))
+        for column in range(2):
+            resources.grid_columnconfigure(column, weight=1, uniform="resources")
+        self.resource_checks = {}
+        for index, (name, label) in enumerate(RESOURCES):
+            check = tk.Checkbutton(resources, text=label, variable=self.options[name],
+                                   command=lambda name=name: self.resource_changed(name),
+                                   bg=WHITE, fg=MUTED, activebackground=WHITE,
+                                   activeforeground=TEXT, selectcolor=WHITE,
+                                   font=(UI_FONT, 11), bd=0, highlightthickness=0)
+            check.grid(row=index // 2, column=index % 2, sticky="w")
+            self.resource_checks[name] = check
+
+        self.task_cards = (daily_card, training_card, connection_card, wilderness_card)
         self.log_panel = log_panel = Panel(frame, inset=14)
+        self._log_panel_minheight = 180
         log_panel.configure(height=180)
         log_panel.grid(row=4, column=0, sticky="nsew", pady=(9, 0))
         self.log_heading = log_heading = tk.Frame(log_panel.body, bg=WHITE)
@@ -528,9 +568,11 @@ class BotWindow:
         badge(log_heading, "terminal", size=26).pack(side="left", padx=(2, 10))
         tk.Label(log_heading, text="运行日志", bg=WHITE, fg=TEXT,
                  font=(UI_FONT, 15, "bold")).pack(side="left")
-        tk.Label(log_heading, text="异常会弹窗提示", bg=WHITE, fg=MUTED,
-                 font=(UI_FONT, 10)).pack(side="right")
-        badge(log_heading, "info", size=15).pack(side="right", padx=(0, 7))
+        log_hint = tk.Frame(log_heading, bg=WHITE)
+        log_hint.pack(side="right")
+        tk.Label(log_hint, text="异常结束时会弹窗提示", bg=WHITE, fg=MUTED,
+                 font=(UI_FONT, 10)).grid(row=0, column=0)
+        badge(log_hint, "info").grid(row=0, column=1, padx=(2, 0), pady=(4, 0))
         log_area = tk.Frame(log_panel.body, bg=FIELD, highlightthickness=1,
                             highlightbackground=BORDER)
         log_area.pack(fill="both", expand=True)
@@ -540,6 +582,19 @@ class BotWindow:
         self.log.tag_configure("task_disabled", foreground=RED)
         self.log_scrollbar = tk.Scrollbar(log_area, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=self.log_scrollbar.set)
+        self.error_area = error_area = tk.Frame(log_panel.body, bg=FIELD, highlightthickness=1,
+                                                highlightbackground=BORDER)
+        tk.Label(error_area, text="异常信息", bg=FIELD, fg=RED,
+                 font=(UI_FONT, 11, "bold")).pack(anchor="w", padx=14, pady=(6, 0))
+        self.error_log = tk.Text(error_area, state="disabled", wrap="char", width=1,
+                                 height=3, bg=FIELD, fg=RED, bd=0, padx=14, pady=9,
+                                 highlightthickness=0, font=(LOG_FONT, 11))
+        error_scrollbar = tk.Scrollbar(error_area, orient="vertical", command=self.error_log.yview)
+        error_scrollbar.pack(side="right", fill="y")
+        self.error_log.configure(yscrollcommand=error_scrollbar.set)
+        self.error_log.pack(side="left", fill="both", expand=True)
+        for text in (self.log, self.error_log):
+            text.bind("<B1-Motion>", self.scroll_log_selection, add="+")
         self.log_placeholder = tk.Frame(log_area, bg=FIELD)
         self.log_placeholder.pack(fill="both", expand=True)
         empty_content = tk.Frame(self.log_placeholder, bg=FIELD)
@@ -581,17 +636,17 @@ class BotWindow:
         width = self.root.winfo_width()
         if width <= 1:
             return
-        columns = 3 if width >= 1040 else 2 if width >= 740 else 1
+        columns = 3 if width >= 1200 else 2 if width >= 740 else 1
         if columns != self._layout_columns:
             self._layout_columns = columns
             for column in range(3):
                 self.cards.grid_columnconfigure(column, weight=1 if column < columns else 0,
                                                 uniform="cards" if column < columns else "", minsize=0)
-            for row in range(3):
+            for row in range(len(self.task_cards)):
                 self.cards.grid_rowconfigure(row, weight=0, minsize=0)
             for index, card in enumerate(self.task_cards):
                 card.configure(width=1, height=300)
-                card.grid(row=index // columns, column=index % columns, sticky="nsew",
+                card.grid(row=index // columns, column=index % columns, sticky="new",
                           padx=(0 if index % columns == 0 else 6,
                                 0 if index % columns == columns - 1 else 6), pady=(0, 10))
             if columns < 3:
@@ -614,6 +669,8 @@ class BotWindow:
         # Settle grid requests before sizing the canvas window; otherwise a narrow
         # layout can retain the old height and make its bottom unreachable.
         self.root.update_idletasks()
+        self.log_panel.configure(height=max(self._log_panel_minheight, self.log_panel.body.winfo_reqheight() +
+                                            2 * self.log_panel.inset))
         self.viewport.itemconfigure(self.content_id,
                                     height=max(self.content.winfo_reqheight(), self.viewport.winfo_height()))
         self.root.update_idletasks()
@@ -676,7 +733,7 @@ class BotWindow:
         self.position_native_images()
 
     def scroll_content(self, event):
-        if event.widget is self.log:
+        if event.widget in (self.log, self.error_log):
             return
         self.viewport.yview_scroll(-1 if event.delta > 0 else 1, "units")
         self.position_native_images()
@@ -692,25 +749,59 @@ class BotWindow:
         body.pack(fill="both", expand=True)
         return card, body
 
-    def option_row(self, parent, name, label, command=None, indent=False):
+    def option_row(self, parent, name, label, command=None, indent=False, hint=None):
         row = tk.Frame(parent, bg=WHITE, height=35)
         row.pack(fill="x")
         row.pack_propagate(False)
         switch = Switch(row, self.options[name], command)
         switch.pack(side="right", pady=3)
-        text = tk.Label(row, text=label, bg=WHITE, fg=MUTED if indent else TEXT,
+        heading = tk.Frame(row, bg=WHITE)
+        heading.pack(side="left", padx=(18 if indent else 2, 0))
+        text = tk.Label(heading, text=label, bg=WHITE, fg=MUTED if indent else TEXT,
                         font=(UI_FONT, 11), cursor="arrow")
-        text.pack(side="left", padx=(18 if indent else 2, 0))
+        text.grid(row=0, column=0)
         text.bind("<Button-1>", switch.toggle)
+        if hint:
+            self.upgrade_hint = self.info_icon(heading, hint)
         tk.Frame(row, bg=BORDER, height=1).place(relx=0, rely=1, relwidth=1, anchor="sw")
         self.switches[name] = switch
 
-    def input_row(self, parent, label, initial, hint):
+    def info_icon(self, parent, hint):
+        icon = badge(parent, "info")
+        icon.configure(takefocus=1)
+        icon.grid(row=0, column=1, padx=(2, 0), pady=(4, 0))
+        icon.tooltip = None
+
+        def show_hint(_event):
+            if icon.tooltip is not None:
+                return
+            icon.tooltip = popup = tk.Toplevel(self.root)
+            popup.overrideredirect(True)
+            popup.geometry(f"+{icon.winfo_rootx()}+{icon.winfo_rooty() + 24}")
+            tk.Label(popup, text=hint, bg=FIELD, fg=TEXT, padx=10, pady=7,
+                     wraplength=300, font=(UI_FONT, 11), relief="solid", bd=1).pack()
+
+        def hide_hint(_event):
+            if icon.tooltip is not None:
+                icon.tooltip.destroy()
+                icon.tooltip = None
+
+        icon.bind("<Enter>", show_hint)
+        icon.bind("<Leave>", hide_hint)
+        icon.bind("<FocusIn>", show_hint)
+        icon.bind("<FocusOut>", hide_hint)
+        return icon
+
+    def input_row(self, parent, label, initial, hint, minimum=1, tooltip=None):
         row = tk.Frame(parent, bg=WHITE)
         row.pack(fill="x", pady=(4, 6))
-        tk.Label(row, text=label, bg=WHITE, fg=MUTED,
-                 font=(UI_FONT, 10)).pack(anchor="w", pady=(0, 5))
-        entry = HintEntry(row, initial, hint)
+        heading = tk.Frame(row, bg=WHITE)
+        heading.pack(fill="x", pady=(0, 5))
+        tk.Label(heading, text=label, bg=WHITE, fg=MUTED,
+                 font=(UI_FONT, 10)).grid(row=0, column=0)
+        entry = HintEntry(row, initial, hint, minimum=minimum)
+        if tooltip:
+            entry.info_icon = self.info_icon(heading, tooltip)
         entry.pack(fill="x")
         return entry
 
@@ -748,18 +839,32 @@ class BotWindow:
         self.refresh_button.set_enabled(True)
 
     def training_changed(self):
-        for name, _ in UNITS:
+        for name, _ in (("upgrade", ""), *UNITS):
             self.switches[name].set_enabled(self.process is None and self.options["train"].get())
 
     def dependent_changed(self):
         self.threshold_entry.set_enabled(self.process is None and self.options["tree"].get())
         self.reconnect_entry.set_enabled(self.process is None and self.options["reconnect"].get())
 
+    def wilderness_changed(self, running=False):
+        enabled = not running and self.process is None
+        self.switches["bounty"].set_enabled(enabled and self.options["intelligence"].get())
+        self.stamina_entry.set_enabled(enabled and self.options["intelligence"].get())
+        for check in self.resource_checks.values():
+            check.configure(state="normal" if enabled and self.options["gather"].get()
+                            else "disabled")
+
+    def resource_changed(self, name):
+        if not any(self.options[key].get() for key, _ in RESOURCES):
+            self.options[name].set(True)
+            messagebox.showwarning("资源采集", "至少要勾选一项资源", parent=self.root)
+
     def set_running(self, running):
-        for name, _ in (*TASKS, ("train", "")):
-            self.switches[name].set_enabled(not running)
+        for switch in self.switches.values():
+            switch.set_enabled(not running)
         self.training_changed()
         self.dependent_changed()
+        self.wilderness_changed(running)
         self.device_box.set_enabled(not running and bool(self.device_lookup))
         self.refresh_button.set_enabled(not running)
 
@@ -774,6 +879,8 @@ class BotWindow:
                 cmd.append(f"--no-{name}")
         if not self.options["train"].get():
             cmd.append("--no-train")
+        elif self.options["upgrade"].get():
+            cmd.append("--upgrade")
         if self.options["tree"].get():
             try:
                 value = int(self.threshold_entry.get())
@@ -782,6 +889,21 @@ class BotWindow:
             if value <= 0:
                 raise ValueError("生命结晶阈值必须大于 0")
             cmd += ["--tree-threshold", str(value)]
+        if self.options["intelligence"].get():
+            try:
+                threshold = int(self.stamina_entry.get())
+            except ValueError:
+                raise ValueError("体力触发阈值必须是大于或等于 0 的整数") from None
+            if threshold < 0:
+                raise ValueError("体力触发阈值必须大于或等于 0")
+            cmd += ["--intelligence", "--stamina-threshold", str(threshold)]
+            if self.options["bounty"].get():
+                cmd.append("--bounty")
+        if self.options["gather"].get():
+            resources = [name for name, _ in RESOURCES if self.options[name].get()]
+            if not resources:
+                raise ValueError("至少要勾选一项资源")
+            cmd += ["--gather", "--resources", *resources]
         if self.options["reconnect"].get():
             try:
                 minutes = float(self.reconnect_entry.get())
@@ -854,11 +976,34 @@ class BotWindow:
         self.log_scrollbar.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
         self.position_native_images()
-        self.log.configure(state="normal")
-        tag = ("task_disabled",) if "⚠️" in line else ()
-        self.log.insert("end", timestamp_line(line) + "\n", tag)
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        error = ("⚠" in line or "已停止：" in line or "首次异常：" in line
+                 or "重试异常：" in line
+                 or re.search(r"(?:^|\s)(?:\w+\.)*\w*(?:Error|Exception):", line))
+        if error and not self.error_area.winfo_manager():
+            self.apply_layout()
+            extra_height = self.error_area.winfo_reqheight() + 14
+            self._log_panel_minheight = self.log_panel.winfo_height() + extra_height
+            self.error_area.pack(fill="x", before=self.log.master, pady=(4, 10))
+            width, height = self.root.winfo_width(), self.root.winfo_height()
+            self.root.geometry(f"{width}x{max(height, min(height + extra_height, self.root.maxsize()[1]))}")
+            self.root.after_idle(self.apply_layout)
+        tag = ("task_disabled",) if error else ()
+        entry = timestamp_line(line) + "\n"
+        for text in ((self.log, self.error_log) if error else (self.log,)):
+            text.configure(state="normal")
+            text.insert("end", entry, tag)
+            if not text.tag_ranges("sel"):
+                text.see("end")
+            text.configure(state="disabled")
+
+    def scroll_log_selection(self, event):
+        # Reuse Tk's selection and timer; Cocoa can omit B1-Leave while dragging.
+        text = event.widget
+        text.tk.call("tk::CancelRepeat")
+        if event.y < 0 or event.y >= text.winfo_height():
+            text.tk.setvar("tk::Priv(x)", event.x)
+            text.tk.setvar("tk::Priv(y)", event.y)
+            text.tk.call("tk::TextAutoScan", str(text))
 
     def close(self):
         if self.process is not None:

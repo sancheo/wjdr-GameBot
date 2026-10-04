@@ -64,31 +64,93 @@ class LiveRegressionTest(unittest.TestCase):
         self.assertEqual(bot.tree_amount(frame, 204, 1200), 5040)
         self.assertEqual(bot.parse_tree_amount('可收集5，040/5，040'), 5040)
 
-    def test_warehouse_navigation_uses_only_confirmed_drawer_row(self):
-        frame = Image.new('RGB', bot.EXPECTED_SIZE)
-        for found in (True, False):
-            with (self.subTest(found=found),
+    def test_stamina_claims_from_current_warehouse_view_without_navigation(self):
+        frame = lambda name: Image.open(bot.ROOT / f'artifacts/{name}.png').convert('RGB')
+        drawer, ready, modal, claimed = map(frame, ('warehouse-after-drawer', 'stamina-ready',
+                                                   'flow-warehouse-can-click', 'stamina-claimed'))
+        timers = {'warehouse': 5000}
+        with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
+              patch.object(bot, 'task_page', return_value=True),
+              patch.object(bot, 'task_drawer', side_effect=AssertionError('不得打开抽屉')),
+              patch.object(bot, 'reward_row', side_effect=AssertionError('不得检查仓库补给行')),
+              patch.object(bot, 'reset_drawer', side_effect=AssertionError('不得重新定位兵营')),
+              patch.object(bot, 'task_screen', side_effect=[ready, modal, claimed]),
+              patch.object(bot, 'task_tap') as tap,
+              patch.object(bot.time, 'monotonic', return_value=100),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            self.assertIs(bot.run_stamina('test', None, None, None, timers,
+                                         initial_image=drawer), claimed)
+        self.assertEqual([call.args[1:] for call in tap.call_args_list],
+                         [(695, 1100), bot.stamina_target(ready), (530, 1700)])
+        self.assertEqual(timers, {'warehouse': 5000, 'stamina': 11127})
+        self.assertIn('已领取体力罐头', output.getvalue())
+
+    def test_stamina_at_warehouse_without_icon_defers_without_navigation(self):
+        frame = Image.open(bot.ROOT / 'artifacts/stamina-claimed.png').convert('RGB')
+        timers = {'warehouse': 5000}
+        with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
+              patch.object(bot, 'task_page', return_value=False),
+              patch.object(bot, 'task_drawer', side_effect=AssertionError('不得打开抽屉')),
+              patch.object(bot, 'reward_row', side_effect=AssertionError('不得检查仓库补给行')),
+              patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'game_foreground', return_value=True),
+              patch.object(bot, 'adb') as adb,
+              patch.object(bot, 'task_tap') as tap,
+              patch.object(bot.time, 'monotonic', return_value=100),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            self.assertIs(bot.run_stamina('test', None, None, None, timers,
+                                         initial_image=frame), frame)
+        tap.assert_not_called()
+        adb.assert_not_called()
+        self.assertEqual(timers, {'warehouse': 5000, 'stamina': 160})
+        self.assertIn('当前主城画面未发现体力罐头图标', output.getvalue())
+
+    def test_stamina_locates_shield_barracks_then_warehouse_before_detecting_can(self):
+        frame = lambda name: Image.open(bot.ROOT / f'artifacts/{name}.png').convert('RGB')
+        away, drawer, ready, modal, claimed = map(frame, ('after-training-back', 'training-drawer',
+                                                        'stamina-ready', 'flow-warehouse-can-click',
+                                                        'stamina-claimed'))
+        timers = {'warehouse': 5000}
+        with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
+              patch.object(bot, 'task_page', return_value=False),
+              patch.object(bot, 'reset_drawer', return_value=drawer) as reset,
+              patch.object(bot, 'task_screen', side_effect=[away, away, ready, modal, claimed]),
+              patch.object(bot, 'stamina_target', wraps=bot.stamina_target) as detect,
+              patch.object(bot, 'game_foreground', return_value=True),
+              patch.object(bot, 'adb') as adb,
+              patch.object(bot, 'task_tap') as tap,
+              patch.object(bot.time, 'monotonic', return_value=100),
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertIs(bot.run_stamina('test', None, None, None, timers,
+                                         initial_image=away), claimed)
+        self.assertEqual(adb.call_count, 2)
+        adb.assert_called_with('test', 'shell', 'input', 'swipe',
+                               '200', '650', '800', '1000', '800')
+        reset.assert_called_once_with('test', away, {'drawer-open': None})
+        self.assertIs(detect.call_args_list[0].args[0], ready)
+        self.assertTrue(all(action.args[0] is not away for action in detect.call_args_list))
+        self.assertEqual([action.args[1:] for action in tap.call_args_list],
+                         [(608, bot.TRAIN_ROWS[0][1]),
+                          bot.stamina_target(ready, bot.warehouse_position(ready)), (530, 1700)])
+        self.assertEqual(timers, {'warehouse': 5000, 'stamina': 11127})
+
+    def test_stamina_does_not_detect_can_when_warehouse_navigation_fails(self):
+        frame = Image.open(bot.ROOT / 'artifacts/after-training-back.png').convert('RGB')
+        for drawer_stuck in (True, False):
+            with (self.subTest(drawer_stuck=drawer_stuck),
                   patch.object(bot, 'inspect', return_value=(True, None, 0)),
-                  patch.object(bot, 'task_page', return_value=False),
-                  patch.object(bot, 'task_drawer', return_value=frame),
-                  patch.object(bot, 'swipe_drawer', return_value=frame),
-                  patch.object(bot, 'TASK_DRAWER_SCROLL', bot.DRAWER_SWIPES),
+                  patch.object(bot, 'task_page', side_effect=[False] + [drawer_stuck] * 5),
+                  patch.object(bot, 'reset_drawer', return_value=frame),
                   patch.object(bot, 'task_screen', return_value=frame),
                   patch.object(bot, 'game_foreground', return_value=True),
-                  patch.object(bot, 'warehouse_position', side_effect=[None, None, (0, 0)]),
-                  patch.object(bot, 'reward_row', return_value=(1 if found else 0, 270, 820)),
-                  patch.object(bot, 'stamina_target', return_value=None),
-                  patch.object(bot, 'warehouse_countdown', return_value=600),
-                  patch.object(bot, 'adb'), patch.object(bot, 'task_tap') as tap,
-                  contextlib.redirect_stdout(io.StringIO())):
-                if found:
-                    bot.run_stamina('test', None, None, None, {}, initial_image=frame)
-                    self.assertIn(('test', 608, 850), [call.args for call in tap.call_args_list])
-                else:
-                    with self.assertRaisesRegex(RuntimeError, '未找到仓库补给任务行'):
-                        bot.run_stamina('test', None, None, None, {}, initial_image=frame)
-                    tap.assert_not_called()
-                self.assertNotIn(('test', 530, 1700), [call.args for call in tap.call_args_list])
+                  patch.object(bot, 'adb') as adb,
+                  patch.object(bot, 'task_tap') as tap,
+                  patch.object(bot, 'stamina_target') as detect,
+                  self.assertRaisesRegex(RuntimeError, '未能通过盾兵训练|未能定位仓库')):
+                bot.run_stamina('test', None, None, None, initial_image=frame)
+            detect.assert_not_called()
+            tap.assert_called_once_with('test', 608, bot.TRAIN_ROWS[0][1])
+            self.assertEqual(adb.call_count, 0 if drawer_stuck else 3)
 
 
 if __name__ == '__main__':

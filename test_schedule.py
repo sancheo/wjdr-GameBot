@@ -15,6 +15,37 @@ PRIORITY_HELP = bot.check_priority_help
 
 
 class ScheduleTest(unittest.TestCase):
+    def test_every_intelligence_round_triggers_gather_and_city_tasks_return_only_when_due(self):
+        clock, timers, events = Clock(), {}, []
+        wilderness = Image.new('RGB', bot.EXPECTED_SIZE)
+        def intelligence():
+            events.append(('intelligence', clock.now))
+            bot.record_timer(timers, 'intelligence', 10)
+            return wilderness
+        def gather():
+            events.append(('gather', clock.now))
+            return wilderness
+        def city():
+            events.append(('city', clock.now))
+            bot.record_timer(timers, 'train', 15)
+        def monitor(_, seconds, *args, **kwargs):
+            self.assertTrue(kwargs['allow_wilderness'])
+            clock.sleep(seconds)
+        with (patch.object(bot.time, 'monotonic', clock.monotonic),
+              patch.object(bot, 'town_button', return_value=True),
+              patch.object(bot, 'pet_page', return_value=False),
+              patch.object(bot, 'task_page', return_value=False),
+              patch.object(bot, 'recover_task_city', side_effect=lambda *args: events.append(('return', clock.now))),
+              patch.object(bot, 'run', side_effect=monitor),
+              contextlib.redirect_stdout(io.StringIO())):
+            bot.run_schedule('test', 24, 2, False,
+                             {'train': city, 'intelligence': intelligence, 'gather': gather},
+                             *([None] * 4), help_enabled=False, timers=timers)
+        self.assertEqual(events, [('city', 100), ('intelligence', 100), ('gather', 100),
+                                  ('intelligence', 110), ('gather', 110),
+                                  ('return', 115), ('city', 115),
+                                  ('intelligence', 120), ('gather', 120)])
+
     def setUp(self):
         priority = patch.object(bot, 'check_priority_help')
         priority.start()
@@ -142,7 +173,8 @@ class ScheduleTest(unittest.TestCase):
         tap.assert_called_once_with('test', 60, 190)
 
     def test_startup_order_and_disabled_tasks(self):
-        for disabled in ([], ['train', 'donate', 'warehouse', 'recruit', 'pet']):
+        for disabled in ([], ['pet'], ['treasure'], ['warehouse'],
+                         ['train', 'donate', 'warehouse', 'recruit', 'pet', 'treasure']):
             options = ['help_bot.py', '--device', 'emulator-test', '--daily-tasks']
             options += ['--no-' + name for name in disabled]
             with (patch('sys.argv', options), patch.object(bot, 'return_to_city', return_value=True),
@@ -150,17 +182,19 @@ class ScheduleTest(unittest.TestCase):
                 bot.main()
             tasks = schedule.call_args.args[4]
             self.assertEqual(list(tasks), [name for name in
-                ['explore', 'train', 'donate', *bot.RECRUIT_TYPES, 'warehouse', 'stamina', 'tree', 'dawn', *bot.PET_SKILLS]
+                ['explore', 'train', 'donate', *bot.RECRUIT_TYPES, 'warehouse', 'stamina', 'treasure', 'tree', 'dawn', *bot.PET_SKILLS]
                 if name not in disabled and not (name in bot.RECRUIT_TYPES and 'recruit' in disabled)
                 and not (name in bot.PET_SKILLS and 'pet' in disabled)
                 and not (name == 'stamina' and 'warehouse' in disabled)])
             with (patch.object(bot, 'run_training') as train,
                   patch.object(bot, 'run_city_tasks') as city,
                   patch.object(bot, 'run_rewards') as rewards, patch.object(bot, 'run_stamina') as stamina,
-                  patch.object(bot, 'run_explore'), patch.object(bot, 'run_pet_skill') as pet):
+                  patch.object(bot, 'run_explore'), patch.object(bot, 'run_pet_skill') as pet,
+                  patch.object(bot, 'run_treasure') as treasure):
                 for task in tasks.values():
                     task()
             self.assertEqual(stamina.call_count, int('warehouse' not in disabled))
+            self.assertEqual(treasure.call_count, int('treasure' not in disabled))
             self.assertEqual(pet.call_count, 0 if 'pet' in disabled else 4)
             self.assertEqual(train.call_count, int('train' not in disabled))
             if 'recruit' not in disabled:
@@ -532,6 +566,37 @@ class ScheduleTest(unittest.TestCase):
         self.assertEqual(len([name for name, _ in calls if name == 'explore']), 2)
         self.assertEqual(output.getvalue().count('⚠️ 生命结晶收集 已连续执行失败3次，后续不再执行这个任务'), 1)
 
+    def test_exhausted_treasure_recovers_before_stamina_or_stops_if_recovery_fails(self):
+        for recovery_fails in (False, True):
+            clock, calls, state = Clock(), [], {'city': True, 'recoveries': 0}
+            def treasure():
+                state['city'] = False
+                raise RuntimeError('宠物寻宝页面未找到宝箱图标')
+            def recover(*_args):
+                state['recoveries'] += 1
+                if recovery_fails and state['recoveries'] >= 4:
+                    raise RuntimeError('未能返回主城')
+                state['city'] = True
+            def stamina():
+                self.assertTrue(state['city'])
+                calls.append('stamina')
+            with (self.subTest(recovery_fails=recovery_fails),
+                  patch.object(bot.time, 'monotonic', clock.monotonic),
+                  patch.object(bot.time, 'sleep', clock.sleep),
+                  patch.object(bot, 'screenshot'),
+                  patch.object(bot, 'forced_offline', return_value=False),
+                  patch.object(bot, 'recover_task_city', side_effect=recover),
+                  patch.object(bot, 'save_task_failure'),
+                  contextlib.redirect_stdout(io.StringIO())):
+                tasks = {'treasure': treasure, 'stamina': stamina}
+                if recovery_fails:
+                    with self.assertRaisesRegex(bot.RetriesExhausted, '停用后恢复主城'):
+                        bot.run_schedule('test', 1, 2, False, tasks, *([None] * 4))
+                else:
+                    bot.run_schedule('test', 1, 2, False, tasks, *([None] * 4))
+                    self.assertEqual(state['recoveries'], 4)
+            self.assertEqual(calls, [] if recovery_fails else ['stamina'])
+
     def test_exhausted_task_stays_skipped_after_reconnect_resets_timers(self):
         clock, calls = Clock(), []
         def failed():
@@ -715,20 +780,19 @@ class ScheduleTest(unittest.TestCase):
         self.assertIsNone(bot.warehouse_countdown(ready, offset=offset))
         self.assertEqual(bot.warehouse_countdown(claimed, offset=offset), 1464)
         timers = {'warehouse': 5000}
-        screens = [ready, frame('flow-warehouse-can-click'), claimed]
+        screens = [frame('flow-warehouse-can-click'), claimed]
         with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
               patch.object(bot, 'task_page', return_value=False),
-              patch.object(bot, 'warehouse_drawer_entry', return_value=(away, 850)) as locate,
+              patch.object(bot, 'reward_row', side_effect=AssertionError('不得检查仓库补给行')),
               patch.object(bot, 'task_screen', side_effect=screens),
               patch.object(bot, 'game_foreground', return_value=True),
               patch.object(bot, 'adb') as adb, patch.object(bot, 'task_tap') as tap,
               patch.object(bot.time, 'monotonic', return_value=100),
               contextlib.redirect_stdout(io.StringIO()) as output):
-            result = bot.run_stamina('test', None, None, None, timers, initial_image=away)
+            result = bot.run_stamina('test', None, None, None, timers, initial_image=ready)
         self.assertIs(result, claimed)
-        locate.assert_called_once()
         adb.assert_not_called()  # No blind city swipes or barracks navigation.
-        self.assertEqual(tap.call_args_list[0].args, ('test', 608, 850))
+        self.assertEqual(tap.call_args_list[0].args, ('test', *bot.stamina_target(ready, offset)))
         self.assertEqual(tap.call_args_list[-1].args, ('test', 530, 1700))
         self.assertEqual(timers, {'warehouse': 5000, 'stamina': 11127})
         self.assertIn('已领取体力罐头', output.getvalue())
