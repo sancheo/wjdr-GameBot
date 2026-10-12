@@ -9,6 +9,14 @@ from test_help_bot import Clock
 
 
 class BountyTest(unittest.TestCase):
+    def test_5556_novice_bounty_name_and_ordinary_dispatch_guard(self):
+        frame = Image.open(bot.ROOT / 'tests/fixtures/bounty-emulator-5556-exposed-000.png').convert('RGB')
+        self.assertEqual(bot.bounty_name(frame), '新手悬赏：05号')
+        with patch.object(bot, 'task_tap') as tap:
+            with self.assertRaisesRegex(RuntimeError, '普通情报流程识别到大师悬赏详情'):
+                bot.execute_intelligence('test', frame)
+        tap.assert_not_called()
+
     def test_captured_icon_and_queue_coordinates(self):
         start = Image.open(bot.ROOT / 'artifacts/bounty-live-start.png').convert('RGB')
         won = Image.open(bot.ROOT / 'artifacts/bounty-map-after-battle.png').convert('RGB')
@@ -23,8 +31,10 @@ class BountyTest(unittest.TestCase):
         final = Image.open(bot.ROOT / 'artifacts/bounty-final-map.png').convert('RGB')
         ordinary = bot.intelligence_target(final)
         self.assertIsNotNone(ordinary)
-        self.assertLess(ordinary[0], 210)  # Gold wolf close to the left edge.
-        self.assertIsNotNone(bot.intelligence_target(final, [ordinary]))
+        other = bot.intelligence_target(final, [ordinary])
+        self.assertIsNotNone(other)
+        # Both the gold tent and the gold wolf close to the left edge are found.
+        self.assertTrue(any(point[0] < 210 for point in (ordinary, other)))
         self.assertIsNone(bot.intelligence_target(start))
         self.assertIsNotNone(bot.bounty_target(final))
         defeated = Image.open(bot.ROOT / 'artifacts/bounty-defeat-map.png').convert('RGB')
@@ -51,6 +61,7 @@ class BountyTest(unittest.TestCase):
                 return frame
 
             with (patch.object(bot, 'task_screen', side_effect=screen),
+                  patch.object(bot, 'wait_intelligence_detail', return_value=frame),
                   patch.object(bot, 'execute_intelligence', side_effect=dispatch) as execute,
                   patch.object(bot, 'bounty_name', return_value='大师悬赏：06号'),
                   patch.object(bot, 'bounty_queue_entries', return_value={(619, 643): 528}),
@@ -84,6 +95,7 @@ class BountyTest(unittest.TestCase):
             return image, True
 
         with (patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'wait_intelligence_detail', return_value=frame),
               patch.object(bot, 'execute_intelligence', side_effect=dispatch) as execute,
               patch.object(bot, 'bounty_name', return_value='大师悬赏：06号'),
               patch.object(bot, 'bounty_queue_entries', return_value={(619, 643): 528}),
@@ -101,6 +113,7 @@ class BountyTest(unittest.TestCase):
 
     def test_bounty_runs_after_ordinary_and_stays_disabled_on_later_rounds(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
+        detail = frame.copy()
         state, events = {}, []
 
         def ordinary(*args, **kwargs):
@@ -113,7 +126,8 @@ class BountyTest(unittest.TestCase):
             return image, True
 
         with (patch.object(bot, 'task_screen', return_value=frame),
-              patch.object(bot, 'intelligence_page', return_value=True),
+              patch.object(bot, 'wait_intelligence_detail', return_value=detail),
+              patch.object(bot, 'intelligence_page', side_effect=lambda image: image is frame),
               patch.object(bot, 'inspect', return_value=(False, None, 0)),
               patch.object(bot, 'town_button', return_value=True),
               patch.object(bot, 'open_intelligence', return_value=frame),

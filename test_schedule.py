@@ -5,16 +5,80 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import stamina_state
 from unittest.mock import patch
 from PIL import Image
 import help_bot as bot
-import gui
+import gui_web as desktop
 from test_help_bot import Clock
 
 PRIORITY_HELP = bot.check_priority_help
 
 
 class ScheduleTest(unittest.TestCase):
+    def test_recruit_page_continues_epic_then_recovers_before_other_tasks(self):
+        clock, timers, calls = Clock(), {}, []
+        page = Image.new('RGB', bot.EXPECTED_SIZE)
+        def advanced():
+            calls.append('advanced')
+            timers['recruit_epic'] = 0
+            return page
+        def epic():
+            calls.append('epic')
+            return page
+        def recover(*args):
+            calls.append('city')
+            return None
+        with (patch.object(bot.time, 'monotonic', clock.monotonic),
+              patch.object(bot, 'task_page', side_effect=lambda image, templates, name: name == 'recruit-title'),
+              patch.object(bot, 'pet_page', return_value=False),
+              patch.object(bot, 'recover_task_city', side_effect=recover),
+              patch.object(bot, 'run', side_effect=lambda _, seconds, *a, **kw: clock.sleep(seconds)),
+              contextlib.redirect_stdout(io.StringIO())):
+            bot.run_schedule('test', 1, 2, False,
+                             {'recruit_advanced': advanced, 'recruit_epic': epic,
+                              'warehouse': lambda: calls.append('warehouse')},
+                             *([None] * 4), help_enabled=False, timers=timers)
+        self.assertEqual(calls, ['advanced', 'epic', 'city', 'warehouse'])
+
+    def test_recruit_page_returns_city_when_no_next_task(self):
+        clock, calls = Clock(), []
+        page = Image.new('RGB', bot.EXPECTED_SIZE)
+        with (patch.object(bot.time, 'monotonic', clock.monotonic),
+              patch.object(bot, 'task_page', side_effect=lambda image, templates, name: name == 'recruit-title'),
+              patch.object(bot, 'pet_page', return_value=False),
+              patch.object(bot, 'recover_task_city', side_effect=lambda *a: calls.append('city')),
+              patch.object(bot, 'run', side_effect=lambda _, seconds, *a, **kw: clock.sleep(seconds)),
+              contextlib.redirect_stdout(io.StringIO())):
+            bot.run_schedule('test', 1, 2, False, {'recruit_advanced': lambda: page},
+                             *([None] * 4), help_enabled=False)
+        self.assertEqual(calls, ['city'])
+
+    def test_explore_runs_at_startup_then_after_8_hours_59_minutes(self):
+        clock, calls = Clock(), []
+        with (patch.object(bot.time, 'monotonic', clock.monotonic),
+              patch.object(bot.time, 'sleep', clock.sleep),
+              patch.object(bot, 'run', side_effect=lambda _, seconds, *a, **kw: clock.sleep(seconds)),
+              contextlib.redirect_stdout(io.StringIO())):
+            bot.run_schedule('test', bot.EXPLORE_INTERVAL + 1, 2, False,
+                             {'explore': lambda: calls.append(clock.now)}, *([None] * 4),
+                             help_enabled=False)
+        self.assertEqual(calls, [100, 32440])
+
+    def test_reconnect_preserves_explore_deadline_and_rechecks_other_tasks(self):
+        clock, calls, monitors = Clock(), [], []
+        def monitor(_, seconds, *a, **kw):
+            monitors.append(seconds)
+            clock.sleep(1 if len(monitors) == 1 else seconds)
+            return len(monitors) == 1
+        with (patch.object(bot.time, 'monotonic', clock.monotonic),
+              patch.object(bot.time, 'sleep', clock.sleep), patch.object(bot, 'run', side_effect=monitor),
+              contextlib.redirect_stdout(io.StringIO())):
+            bot.run_schedule('test', 20, 2, False,
+                             {name: lambda name=name: calls.append(name) for name in ('explore', 'donate')},
+                             *([None] * 4), help_enabled=False)
+        self.assertEqual(calls, ['explore', 'donate', 'donate'])
+
     def test_every_intelligence_round_triggers_gather_and_city_tasks_return_only_when_due(self):
         clock, timers, events = Clock(), {}, []
         wilderness = Image.new('RGB', bot.EXPECTED_SIZE)
@@ -47,9 +111,18 @@ class ScheduleTest(unittest.TestCase):
                                   ('intelligence', 120), ('gather', 120)])
 
     def setUp(self):
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        state_patch = patch.object(stamina_state, 'state_path',
+                                   side_effect=lambda root, serial: Path(state_dir.name) / (serial + '.json'))
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
         priority = patch.object(bot, 'check_priority_help')
         priority.start()
         self.addCleanup(priority.stop)
+        capture = patch.object(bot, 'color_screenshot', side_effect=RuntimeError('测试中不连接模拟器'))
+        capture.start()
+        self.addCleanup(capture.stop)
 
     def test_three_exhausted_tasks_stop_and_success_resets_streak(self):
         for outcomes, stopped in (([False, False, False, True], True),
@@ -173,16 +246,16 @@ class ScheduleTest(unittest.TestCase):
         tap.assert_called_once_with('test', 60, 190)
 
     def test_startup_order_and_disabled_tasks(self):
-        for disabled in ([], ['pet'], ['treasure'], ['warehouse'],
+        for disabled in ([], ['pet'], ['treasure'], ['warehouse'], ['task_rewards'],
                          ['train', 'donate', 'warehouse', 'recruit', 'pet', 'treasure']):
             options = ['help_bot.py', '--device', 'emulator-test', '--daily-tasks']
-            options += ['--no-' + name for name in disabled]
+            options += ['--no-' + name.replace('_', '-') for name in disabled]
             with (patch('sys.argv', options), patch.object(bot, 'return_to_city', return_value=True),
                   patch.object(bot, 'run_schedule') as schedule):
                 bot.main()
             tasks = schedule.call_args.args[4]
             self.assertEqual(list(tasks), [name for name in
-                ['explore', 'train', 'donate', *bot.RECRUIT_TYPES, 'warehouse', 'stamina', 'treasure', 'tree', 'dawn', *bot.PET_SKILLS]
+                ['explore', 'train', 'donate', *bot.RECRUIT_TYPES, 'warehouse', 'stamina', 'treasure', 'tree', 'dawn', *bot.PET_SKILLS, 'task_rewards']
                 if name not in disabled and not (name in bot.RECRUIT_TYPES and 'recruit' in disabled)
                 and not (name in bot.PET_SKILLS and 'pet' in disabled)
                 and not (name == 'stamina' and 'warehouse' in disabled)])
@@ -190,10 +263,12 @@ class ScheduleTest(unittest.TestCase):
                   patch.object(bot, 'run_city_tasks') as city,
                   patch.object(bot, 'run_rewards') as rewards, patch.object(bot, 'run_stamina') as stamina,
                   patch.object(bot, 'run_explore'), patch.object(bot, 'run_pet_skill') as pet,
-                  patch.object(bot, 'run_treasure') as treasure):
+                  patch.object(bot, 'run_treasure') as treasure,
+                  patch.object(bot.task_rewards, 'run') as task_reward):
                 for task in tasks.values():
                     task()
             self.assertEqual(stamina.call_count, int('warehouse' not in disabled))
+            self.assertEqual(task_reward.call_count, int('task_rewards' not in disabled))
             self.assertEqual(treasure.call_count, int('treasure' not in disabled))
             self.assertEqual(pet.call_count, 0 if 'pet' in disabled else 4)
             self.assertEqual(train.call_count, int('train' not in disabled))
@@ -300,11 +375,11 @@ class ScheduleTest(unittest.TestCase):
                                ('00：00：01', 1), ('12天11:13:00', 1077180), ('已完成', None),
                                ('01:80:00', None), ('1,234/5,040', None)]:
             self.assertEqual(bot.parse_countdown(text), expected)
-        line = gui.timestamp_line('运行中')
+        line = desktop.timestamp_line('运行中')
         self.assertRegex(line, r'^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] 运行中$')
-        self.assertEqual(gui.timestamp_line(line), line)
-        self.assertEqual(gui.exception_reason(['正常日志', gui.timestamp_line('已停止：真正原因')], 1), '真正原因')
-        self.assertEqual(gui.exception_reason(['历史日志', 'ValueError: broken'], 1), 'ValueError: broken')
+        self.assertEqual(desktop.timestamp_line(line), line)
+        self.assertEqual(desktop.exception_reason(['正常日志', desktop.timestamp_line('已停止：真正原因')], 1), '真正原因')
+        self.assertEqual(desktop.exception_reason(['历史日志', 'ValueError: broken'], 1), 'ValueError: broken')
 
     def test_delayed_help_and_unchanged_help_do_not_stop(self):
         frame = Image.new('L', (1080, 2340))
@@ -338,17 +413,17 @@ class ScheduleTest(unittest.TestCase):
             self.assertIs(bot.wait_city_after_island('test', None, None), frame)
         self.assertEqual(capture.call_count, 3)
 
-    def test_island_return_timeout_saves_failure_frame(self):
+    def test_island_return_timeout_defers_screenshot_to_exception_threshold(self):
         frame = Image.new('RGB', (1080, 2340))
         with (patch.object(bot, 'task_screen', return_value=frame) as capture,
               patch.object(bot, 'inspect', return_value=(False, None, 27.5)),
               patch.object(frame, 'save') as save):
             with self.assertRaisesRegex(RuntimeError, '返回主城超时；底栏差异 27.5'):
                 bot.wait_city_after_island('test', None, None)
-        self.assertEqual(capture.call_count, 8)
-        self.assertIn('island-return-', str(save.call_args.args[0]))
+        self.assertEqual(capture.call_count, 30)
+        save.assert_not_called()
 
-    def test_cleanup_only_removes_old_or_excess_generated_screenshots(self):
+    def test_cleanup_expires_legacy_generated_screenshots_after_seven_days(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             directory = root / 'artifacts'
@@ -360,7 +435,7 @@ class ScheduleTest(unittest.TestCase):
                 os.utime(path, (now - index, now - index))
             old = directory / 'island-return-20250801-120000-000000.png'
             old.touch()
-            os.utime(old, (now - 31 * 86400, now - 31 * 86400))
+            os.utime(old, (now - 8 * 86400, now - 8 * 86400))
             fixture = directory / 'tree-page.png'
             fixture.touch()
             manual = directory / 'island-return-not-generated.png'
@@ -368,7 +443,7 @@ class ScheduleTest(unittest.TestCase):
             with (patch.object(bot, 'ROOT', root), patch.object(bot.time, 'time', return_value=now),
                   contextlib.redirect_stdout(io.StringIO())):
                 bot.cleanup_diagnostic_screenshots()
-            self.assertEqual(len(list(directory.glob('island-return-20260926-*.png'))), 20)
+            self.assertEqual(len(list(directory.glob('island-return-20260926-*.png'))), 23)
             self.assertFalse(old.exists())
             self.assertTrue(fixture.exists())
             self.assertTrue(manual.exists())
@@ -444,19 +519,25 @@ class ScheduleTest(unittest.TestCase):
               patch.object(bot, 'screenshot', return_value=frame),
               patch.object(bot, 'forced_offline', return_value=False),
               patch.object(bot, 'inspect', return_value=(False, None, 62.8)),
+              patch.object(bot, 'resource_more_target', return_value=None),
+              patch.object(bot, 'training_back_target', return_value=None),
               patch.object(bot, 'reconnect_popup_target', return_value=None),
               patch.object(bot, 'pet_page', return_value=False),
               patch.object(bot, 'pet_reward_page', return_value=False),
               patch.object(bot, 'stamina_page', return_value=False),
               patch.object(bot, 'warehouse_reward_timer', return_value=(False, None)),
               patch.object(bot, 'recruit_hero_exit_page', return_value=False),
-              patch.object(bot, 'chat_page', return_value=False),
               patch.object(bot, 'island_page', return_value=False),
+              patch.object(bot, 'treasure_back_target', return_value=None),
+              patch.object(bot, 'gather_back_target', return_value=None),
+              patch.object(bot, 'intelligence_back_target', return_value=None),
               patch.object(bot, 'town_button', return_value=False),
+              patch.object(bot, 'task_back') as back,
               contextlib.redirect_stdout(io.StringIO()) as output):
             with self.assertRaisesRegex(RuntimeError, '60 秒内仍未确认主城'):
                 bot.return_to_city('test', None, None, None, None)
         self.assertEqual(clock.now, 160)
+        self.assertEqual(back.call_count, 3)
         self.assertIn('正在恢复主城，已等待 10/60 秒，底栏差异 62.8', output.getvalue())
 
     def test_three_retries_exhaust_with_task_name(self):
@@ -563,8 +644,8 @@ class ScheduleTest(unittest.TestCase):
                              *([None] * 4))
         self.assertEqual([when for name, when in calls if name == 'tree'], [100, 110, 120, 130])
         self.assertEqual(len([name for name, _ in calls if name == 'donate']), 2)
-        self.assertEqual(len([name for name, _ in calls if name == 'explore']), 2)
-        self.assertEqual(output.getvalue().count('⚠️ 生命结晶收集 已连续执行失败3次，后续不再执行这个任务'), 1)
+        self.assertEqual(len([name for name, _ in calls if name == 'explore']), 1)
+        self.assertEqual(output.getvalue().count('⚠️ 生命结晶收集 连续3次重试失败，本次程序运行期间跳过该任务'), 1)
 
     def test_exhausted_treasure_recovers_before_stamina_or_stops_if_recovery_fails(self):
         for recovery_fails in (False, True):
@@ -701,13 +782,14 @@ class ScheduleTest(unittest.TestCase):
 
     def test_epic_cooldown_returns_without_clicking_recruit(self):
         frame = Image.new('RGB', (1080, 2340))
+        recruit = frame.copy()
         with (patch.object(bot, 'TASK_DRAWER_SCROLL', 1),
               patch.object(bot, 'inspect', return_value=(True, None, 0)),
               patch.object(bot, 'task_drawer', return_value=frame),
               patch.object(bot, 'recruit_row', return_value=(frame, 955)),
               patch.object(bot, 'find_green', return_value=(1, 280, 970)),
-              patch.object(bot, 'task_page', return_value=True),
-              patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'task_page', side_effect=lambda image, templates, name: name != 'recruit-title' or image is recruit),
+              patch.object(bot, 'task_screen', side_effect=[recruit, frame]),
               patch.object(bot, 'recruit_button_state', return_value=('cooldown', '下次免费')),
               patch.object(bot, 'recruit_timer', return_value=frame) as timer,
               patch.object(bot, 'task_tap') as tap,
@@ -718,11 +800,12 @@ class ScheduleTest(unittest.TestCase):
                          [(600, 970), (60, 190)])
         timer.assert_called_once()
 
-    def test_recruit_retry_saves_all_failure_frames(self):
+    def test_recruit_retry_saves_only_third_failure_frame(self):
         frame = Image.new('L', bot.EXPECTED_SIZE)
         with (tempfile.TemporaryDirectory() as directory,
               patch.object(bot, 'ROOT', Path(directory)),
               patch.object(bot, 'screenshot', return_value=frame),
+              patch.object(bot, 'color_screenshot', return_value=frame.convert('RGB')),
               patch.object(bot, 'forced_offline', return_value=False),
               patch.object(bot.time, 'sleep'),
               contextlib.redirect_stdout(io.StringIO())):
@@ -730,7 +813,7 @@ class ScheduleTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '重试失败'):
                 bot.retry_once('史诗招募', lambda: (_ for _ in ()).throw(RuntimeError('识别失败')),
                                'test', None, None)
-            self.assertEqual(len(list((Path(directory) / 'artifacts').glob('recruit-failure-*.png'))), 4)
+            self.assertEqual(len(list((Path(directory) / 'artifacts' / bot.DIAGNOSTIC_SCREENSHOT_DIR).glob('test/*/recruit-failure-*.png'))), 1)
 
     def test_both_recruit_countdowns_from_saved_drawer(self):
         frame = Image.open(bot.ROOT / 'artifacts/drawer-flow-1.png').convert('RGB')
@@ -774,7 +857,7 @@ class ScheduleTest(unittest.TestCase):
         away, ready, claimed = map(frame, ('after-training-back', 'stamina-ready', 'stamina-claimed'))
         self.assertIsNone(bot.warehouse_position(away))
         offset = bot.warehouse_position(ready)
-        self.assertEqual(offset, (-36, -266))
+        self.assertEqual(offset, (-35, -266))
         self.assertIsNotNone(bot.stamina_target(ready, offset))
         self.assertIsNone(bot.stamina_target(claimed, offset))
         self.assertIsNone(bot.warehouse_countdown(ready, offset=offset))
@@ -782,6 +865,7 @@ class ScheduleTest(unittest.TestCase):
         timers = {'warehouse': 5000}
         screens = [frame('flow-warehouse-can-click'), claimed]
         with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
+              patch.object(bot.time, 'time', return_value=1000),
               patch.object(bot, 'task_page', return_value=False),
               patch.object(bot, 'reward_row', side_effect=AssertionError('不得检查仓库补给行')),
               patch.object(bot, 'task_screen', side_effect=screens),
@@ -794,9 +878,10 @@ class ScheduleTest(unittest.TestCase):
         adb.assert_not_called()  # No blind city swipes or barracks navigation.
         self.assertEqual(tap.call_args_list[0].args, ('test', *bot.stamina_target(ready, offset)))
         self.assertEqual(tap.call_args_list[-1].args, ('test', 530, 1700))
-        self.assertEqual(timers, {'warehouse': 5000, 'stamina': 11127})
+        self.assertEqual(timers['warehouse'], 5000)
+        self.assertEqual(timers['stamina'], 11127)
         self.assertIn('已领取体力罐头', output.getvalue())
-        self.assertIn('体力罐头 倒计时 11027 秒，预计完成时间', output.getvalue())
+        self.assertIn('体力罐头剩余时间 11027 秒，本地刷新时间已保存', output.getvalue())
 
     def test_stamina_cooldown_unknown_timer_and_modal_guard(self):
         claimed = Image.open(bot.ROOT / 'artifacts/stamina-claimed.png').convert('RGB')

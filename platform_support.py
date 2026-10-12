@@ -11,6 +11,19 @@ ROOT = Path(__file__).resolve().parent
 SUBPROCESS_OPTIONS = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
+def terminate_task_process(process):
+    """Terminate an owned task, including Windows venv interpreter children."""
+    pid = process.pid
+    if sys.platform == "win32" and isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+        result = subprocess.run([str(executable), "/PID", str(pid), "/T", "/F"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=5, **SUBPROCESS_OPTIONS)
+        if result.returncode == 0:
+            return
+    process.terminate()
+
+
 def resolve_adb():
     """Prefer an explicit override, then bundled tools, SDK and PATH."""
     if os.environ.get("GAMEBOT_ADB"):

@@ -3,6 +3,9 @@
 import contextlib
 import io
 import unittest
+import tempfile
+from pathlib import Path
+import stamina_state
 from unittest.mock import patch
 
 from PIL import Image
@@ -11,6 +14,79 @@ import help_bot as bot
 
 
 class LiveRegressionTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        state = patch.object(stamina_state, 'state_path',
+                             side_effect=lambda root, key: Path(directory.name) / (key + '.json'))
+        state.start()
+        self.addCleanup(state.stop)
+        wall_time = patch.object(bot.time, 'time', return_value=1000)
+        wall_time.start()
+        self.addCleanup(wall_time.stop)
+
+    def test_tree_title_does_not_stop_scroll_when_count_is_clipped(self):
+        clipped = Image.open(bot.ROOT / 'tests/fixtures/tree-1006-after-claim-drawer.png').convert('RGB')
+        full = Image.open(bot.ROOT / 'tests/fixtures/tree-count-low-row-5554.png').convert('RGB')
+        template = Image.open(bot.ROOT / 'assets/emulator-tree-collect-label.png').convert('RGB')
+        self.assertIsNone(bot.tree_drawer_amount(clipped, template)[0])
+        asset = lambda name: Image.open(bot.ROOT / f'assets/emulator-{name}.png').convert('L')
+        with (patch.object(bot, 'task_drawer', return_value=clipped),
+              patch.object(bot, 'swipe_drawer', return_value=full) as swipe,
+              patch.object(bot, 'task_tap') as tap,
+              contextlib.redirect_stdout(io.StringIO())):
+            result = bot.run_rewards('test', asset('help-icon'), asset('city-nav'), None,
+                                     None, template, None, initial_image=clipped,
+                                     warehouse=False, dawn=False, tree_threshold=1000,
+                                     keep_open=True)
+        self.assertIs(result, full)
+        swipe.assert_called_once_with('test', None)
+        tap.assert_not_called()
+
+    def test_island_return_waits_past_eight_transition_frames(self):
+        frame = Image.new('RGB', bot.EXPECTED_SIZE)
+        with (patch.object(bot, 'task_screen', return_value=frame) as capture,
+              patch.object(bot, 'inspect', side_effect=[(False, None, 87.5)] * 9
+                           + [(True, None, 0), (False, None, 87.5)]
+                           + [(True, None, 0)] * 2)):
+            self.assertIs(bot.wait_city_after_island('test', None, None), frame)
+        self.assertEqual(capture.call_count, 13)
+
+    def test_reported_tree_failure_recognizes_574_at_lowest_drawer_row(self):
+        frame = Image.open(bot.ROOT / 'tests/fixtures/tree-count-low-row-5554.png').convert('RGB')
+        template = Image.open(bot.ROOT / 'assets/emulator-tree-collect-label.png').convert('RGB')
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                with patch.object(bot, 'find_green', return_value=(0, 0, 0)) if fallback else contextlib.nullcontext():
+                    amount, y = bot.tree_drawer_amount(frame, template)
+                self.assertEqual(amount, 574)
+                self.assertTrue(1545 <= y <= 1565)
+
+        asset = lambda name: Image.open(bot.ROOT / f'assets/emulator-{name}.png').convert('L')
+        with (patch.object(bot, 'task_drawer', return_value=frame),
+              patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'swipe_drawer') as swipe,
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            result = bot.run_rewards('test', asset('help-icon'), asset('city-nav'), None,
+                                     None, template, None, initial_image=frame,
+                                     warehouse=False, dawn=False, tree_threshold=1000,
+                                     keep_open=True)
+        self.assertIs(result, frame)
+        tap.assert_not_called()
+        swipe.assert_not_called()
+        self.assertIn('可收集数量 574，未达到阈值 1000', output.getvalue())
+
+    def test_tree_count_near_drawer_bottom_is_not_cropped(self):
+        frame = Image.open(bot.ROOT / 'tests/fixtures/tree-count-bottom-5554.png').convert('RGB')
+        template = Image.open(bot.ROOT / 'assets/emulator-tree-collect-label.png').convert('RGB')
+        amount, y = bot.tree_drawer_amount(frame, template)
+        self.assertEqual(amount, 119)
+        self.assertTrue(1460 <= y <= 1480)
+        with patch.object(bot, 'find_green', return_value=(0, 0, 0)):
+            amount, y = bot.tree_drawer_amount(frame, template)
+        self.assertEqual(amount, 119)
+        self.assertTrue(1460 <= y <= 1480)
+
     def test_pet_cooldown_falls_back_to_its_own_icon_after_ocr_noise(self):
         frame = Image.open(bot.ROOT / 'artifacts/pet-cooldown-ocr-windows.png').convert('RGB')
         self.assertEqual(bot.pet_skill_state(frame, '心灵伴侣'), ('cooldown', 54398))
@@ -25,6 +101,7 @@ class LiveRegressionTest(unittest.TestCase):
     def test_drawer_waits_for_open_animation_without_toggling_again(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
         with (patch.object(bot, 'task_page', side_effect=[False, False, True]),
+              patch.object(bot, 'closed_city_drawer', return_value=False),
               patch.object(bot, 'task_screen', return_value=frame) as screen,
               patch.object(bot, 'task_tap') as tap,
               patch.object(bot, 'TASK_DRAWER_SCROLL', 0)):
@@ -105,7 +182,7 @@ class LiveRegressionTest(unittest.TestCase):
         self.assertEqual(timers, {'warehouse': 5000, 'stamina': 160})
         self.assertIn('当前主城画面未发现体力罐头图标', output.getvalue())
 
-    def test_stamina_locates_shield_barracks_then_warehouse_before_detecting_can(self):
+    def test_stamina_locates_research_then_warehouse_before_detecting_can(self):
         frame = lambda name: Image.open(bot.ROOT / f'artifacts/{name}.png').convert('RGB')
         away, drawer, ready, modal, claimed = map(frame, ('after-training-back', 'training-drawer',
                                                         'stamina-ready', 'flow-warehouse-can-click',
@@ -114,7 +191,9 @@ class LiveRegressionTest(unittest.TestCase):
         with (patch.object(bot, 'inspect', return_value=(True, None, 0)),
               patch.object(bot, 'task_page', return_value=False),
               patch.object(bot, 'reset_drawer', return_value=drawer) as reset,
-              patch.object(bot, 'task_screen', side_effect=[away, away, ready, modal, claimed]),
+              patch.object(bot, 'research_drawer_target', return_value=(608, 1500)),
+              patch.object(bot, 'stamina_map_screen', side_effect=[away, away, ready]),
+              patch.object(bot, 'task_screen', side_effect=[away, modal, claimed]),
               patch.object(bot, 'stamina_target', wraps=bot.stamina_target) as detect,
               patch.object(bot, 'game_foreground', return_value=True),
               patch.object(bot, 'adb') as adb,
@@ -125,12 +204,12 @@ class LiveRegressionTest(unittest.TestCase):
                                          initial_image=away), claimed)
         self.assertEqual(adb.call_count, 2)
         adb.assert_called_with('test', 'shell', 'input', 'swipe',
-                               '200', '650', '800', '1000', '800')
+                               '300', '700', '600', '875', '1500')
         reset.assert_called_once_with('test', away, {'drawer-open': None})
         self.assertIs(detect.call_args_list[0].args[0], ready)
         self.assertTrue(all(action.args[0] is not away for action in detect.call_args_list))
         self.assertEqual([action.args[1:] for action in tap.call_args_list],
-                         [(608, bot.TRAIN_ROWS[0][1]),
+                         [(608, 1500),
                           bot.stamina_target(ready, bot.warehouse_position(ready)), (530, 1700)])
         self.assertEqual(timers, {'warehouse': 5000, 'stamina': 11127})
 
@@ -141,16 +220,17 @@ class LiveRegressionTest(unittest.TestCase):
                   patch.object(bot, 'inspect', return_value=(True, None, 0)),
                   patch.object(bot, 'task_page', side_effect=[False] + [drawer_stuck] * 5),
                   patch.object(bot, 'reset_drawer', return_value=frame),
+                  patch.object(bot, 'research_drawer_target', return_value=(608, 1500)),
                   patch.object(bot, 'task_screen', return_value=frame),
                   patch.object(bot, 'game_foreground', return_value=True),
                   patch.object(bot, 'adb') as adb,
                   patch.object(bot, 'task_tap') as tap,
                   patch.object(bot, 'stamina_target') as detect,
-                  self.assertRaisesRegex(RuntimeError, '未能通过盾兵训练|未能定位仓库')):
+                  self.assertRaisesRegex(RuntimeError, '未能通过科技研究|未能定位仓库')):
                 bot.run_stamina('test', None, None, None, initial_image=frame)
             detect.assert_not_called()
-            tap.assert_called_once_with('test', 608, bot.TRAIN_ROWS[0][1])
-            self.assertEqual(adb.call_count, 0 if drawer_stuck else 3)
+            tap.assert_called_once_with('test', 608, 1500)
+            self.assertEqual(adb.call_count, 0 if drawer_stuck else 5)
 
 
 if __name__ == '__main__':

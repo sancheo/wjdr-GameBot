@@ -15,6 +15,14 @@ import platform_support as host
 
 
 class PlatformTest(unittest.TestCase):
+    def test_windows_force_stop_targets_only_owned_task_tree(self):
+        process = Mock(pid=12345)
+        with (patch.object(host.sys, "platform", "win32"),
+              patch.object(host.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run):
+            host.terminate_task_process(process)
+        self.assertEqual(run.call_args.args[0][1:], ["/PID", "12345", "/T", "/F"])
+        process.terminate.assert_not_called()
+
     def test_adb_keeps_mac_binary_and_prefers_windows_executable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

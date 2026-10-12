@@ -1,4 +1,7 @@
 Pillow>=10,<12
+pywebview>=6,<7; sys_platform == "win32"
+numpy>=1.26,<3
+opencv-python-headless>=4.8,<6
 pyobjc-core; sys_platform == "darwin"
 pyobjc-framework-Cocoa; sys_platform == "darwin"
 rapidocr-onnxruntime==1.4.4; sys_platform == "win32"

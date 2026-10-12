@@ -11,10 +11,29 @@ import help_bot as bot
 
 
 class TreasureTest(unittest.TestCase):
+    def assert_completed_drawer_entry(self, tap):
+        self.assertEqual(tap.call_args_list[0].args[:2], ('test', 605))
+        # Vision 与 RapidOCR 对同一行底边有一两个像素的差异。
+        self.assertAlmostEqual(tap.call_args_list[0].args[2], 1408, delta=2)
+
     def setUp(self):
         scroll = patch.object(bot, 'TASK_DRAWER_SCROLL', 0)
         scroll.start()
         self.addCleanup(scroll.stop)
+
+    def test_5556_header_variant_recognizes_page_count_and_back(self):
+        with Image.open(bot.ROOT / 'tests/fixtures/treasure-1007-current-5556.png') as saved:
+            frame = saved.convert('RGB')
+        for mode in ('RGB', 'L'):
+            with self.subTest(mode=mode):
+                image = frame.convert(mode)
+                self.assertTrue(bot.treasure_page(image))
+                self.assertEqual(bot.treasure_remaining(image), 4)
+                with patch.object(bot, 'recognize_text', side_effect=AssertionError('map exit needs no OCR')):
+                    self.assertEqual(bot.treasure_back_target(image), (60, 190))
+        frame.paste((20, 65, 110), (110, 140, 390, 250))
+        self.assertFalse(bot.treasure_page(frame))
+        self.assertIsNone(bot.treasure_remaining(frame))
 
     def test_failure_maps_offer_purple_and_orange_chests(self):
         frame = Image.open(bot.ROOT / 'artifacts/treasure-mixed-chests.png').convert('RGB')
@@ -123,7 +142,28 @@ class TreasureTest(unittest.TestCase):
             self.assertIs(bot.run_treasure('test', None, None, drawer), drawer)
         claim.assert_not_called()
         reset.assert_not_called()
-        self.assertEqual(tap.call_args_list, [call('test', 605, 1408), call('test', 60, 190)])
+        self.assert_completed_drawer_entry(tap)
+        self.assertEqual(tap.call_args_list[1:], [call('test', 60, 190)])
+
+    def test_5554_completed_row_at_drawer_bottom_enters_without_scrolling(self):
+        with Image.open(bot.ROOT / 'tests/fixtures/treasure-completed-bottom-5554.png') as saved:
+            drawer = saved.convert('RGB')
+        page = Image.open(bot.ROOT / 'artifacts/treasure-claimed-map.png').convert('RGB')
+        with (patch.object(bot, 'color_screenshot', return_value=drawer),
+              patch.object(bot, 'inspect', return_value=(True, None, 0)),
+              patch.object(bot, 'task_drawer', return_value=drawer),
+              patch.object(bot, 'TASK_DRAWER_SCROLL', None),
+              patch.object(bot, 'reset_drawer', return_value=drawer) as reset,
+              patch.object(bot, 'swipe_drawer', return_value=drawer) as swipe,
+              patch.object(bot, 'treasure_remaining', return_value=0),
+              patch.object(bot, 'task_screen', side_effect=[page, drawer]),
+              patch.object(bot, 'task_tap') as tap):
+            self.assertIs(bot.run_treasure('test', None, None, drawer), drawer)
+        reset.assert_not_called()
+        swipe.assert_not_called()
+        self.assertEqual(tap.call_args_list[0].args[:2], ('test', 605))
+        self.assertAlmostEqual(tap.call_args_list[0].args[2], 1537, delta=2)
+        self.assertEqual(tap.call_args_list[1:], [call('test', 60, 190)])
 
     def test_chest_matches_bright_snow_without_matching_an_empty_map(self):
         frame = Image.open(bot.ROOT / 'artifacts/treasure-bright-snow.png').convert('RGB')
@@ -168,8 +208,9 @@ class TreasureTest(unittest.TestCase):
               patch.object(bot, 'task_tap') as tap):
             self.assertIs(bot.run_treasure('test', None, None, drawer), drawer)
         chest.assert_not_called()
-        self.assertEqual([c.args[1:] for c in tap.call_args_list],
-                         [(605, 1408), first, (540, 1490), (540, 2100), (960, 640),
+        self.assert_completed_drawer_entry(tap)
+        self.assertEqual([c.args[1:] for c in tap.call_args_list[1:]],
+                         [first, (540, 1490), (540, 2100), (960, 640),
                           second, (540, 1490), (540, 2100), (960, 640), (60, 190)])
 
     def test_treasure_retry_preserves_color_failure_screenshots(self):
@@ -182,14 +223,15 @@ class TreasureTest(unittest.TestCase):
               patch.object(bot.time, 'sleep'),
               contextlib.redirect_stdout(io.StringIO()) as output):
             (Path(directory) / 'artifacts').mkdir()
-            with self.assertRaisesRegex(bot.RetriesExhausted, '未找到宝箱图标'):
+            with self.assertRaisesRegex(bot.RetriesExhausted, '未找到宝箱图标') as raised:
                 bot.retry_once('宠物寻宝', lambda: (_ for _ in ()).throw(RuntimeError('未找到宝箱图标')),
                                'test', None, None)
-            frames = list((Path(directory) / 'artifacts').glob('treasure-failure-*.png'))
-            self.assertEqual(len(frames), 4)
+            frames = list((Path(directory) / 'artifacts' / bot.DIAGNOSTIC_SCREENSHOT_DIR).glob('test/*/treasure-failure-*.png'))
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(bot.exception_screenshot('test', raised.exception), f'失败截图：{frames[0]}')
             with Image.open(frames[0]) as saved:
                 self.assertEqual(saved.getpixel((100, 100)), (10, 80, 200))
-        self.assertEqual(output.getvalue().count('失败截图：'), 4)
+        self.assertEqual(output.getvalue().count('失败截图：'), 1)
 
     def test_alliance_red_dot_claims_before_zero_remaining_exit(self):
         page = Image.open(bot.ROOT / 'artifacts/treasure-page.png').convert('RGB')
@@ -247,6 +289,30 @@ class TreasureTest(unittest.TestCase):
         with patch.object(bot, 'intelligence_text_target', side_effect=target):
             self.assertEqual(bot.treasure_back_target(alliance), (1000, 510))
 
+    def test_live_alliance_claim_button_is_recognized(self):
+        page = Image.open(bot.ROOT / 'tests/fixtures/treasure-four-attempts.png').convert('RGB')
+        alliance = Image.open(bot.ROOT / 'tests/fixtures/treasure-alliance-ready.png').convert('RGB')
+        reward = Image.open(bot.ROOT / 'artifacts/treasure-reward.png').convert('RGB')
+        self.assertEqual(bot.treasure_remaining(page), 4)
+        with (patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'task_screen', side_effect=[alliance, reward, alliance, page])):
+            self.assertIs(bot.claim_alliance_treasure('test', page), page)
+        self.assertEqual(tap.call_args_list[0], call('test', 950, 2220))
+        x, y = tap.call_args_list[1].args[1:]
+        self.assertTrue(480 <= x <= 590 and 1860 <= y <= 1940)
+        self.assertEqual(tap.call_args_list[2:], [call('test', 540, 2100), call('test', 1000, 510)])
+
+    def test_live_dispatch_count_ignores_duplicate_ocr_digit(self):
+        page = Image.open(bot.ROOT / 'tests/fixtures/treasure-three-attempts.png').convert('RGB')
+        self.assertEqual(bot.treasure_remaining(page), 3)
+        with patch.object(bot, 'recognize_text', return_value=[
+                ('今日剩余寻宝次数：3', (60, 38, 381, 56)),
+                ('3', (426, 50, 25, 32))]):
+            self.assertEqual(bot.treasure_remaining(page), 3)
+        # 无标签数字不能冒充尚未识别的次数。
+        with patch.object(bot, 'recognize_text', return_value=[('3', (426, 50, 25, 32))]):
+            self.assertIsNone(bot.treasure_remaining(page))
+
     def test_chest_matches_left_edge_and_coarse_grid_offsets(self):
         page = Image.open(bot.ROOT / 'artifacts/treasure-page.png').convert('RGB')
         claimed = Image.open(bot.ROOT / 'artifacts/treasure-claimed-map.png').convert('RGB')
@@ -287,6 +353,38 @@ class TreasureTest(unittest.TestCase):
                     self.assertEqual(tap.call_args_list[1], call('test', 389, 782))
                 self.assertEqual(chest.call_count, len(targets))
 
+    def test_share_button_sample_and_shared_state(self):
+        share = Image.open(bot.ROOT / 'tests/fixtures/treasure-share-5554.png').convert('RGB')
+        shared = Image.open(bot.ROOT / 'tests/fixtures/treasure-shared-5554.png').convert('RGB')
+        self.assertEqual(bot.treasure_share_target(share), (852, 1765))
+        self.assertIsNone(bot.treasure_share_target(shared))
+        shifted = share.copy()
+        shifted.paste((180, 220, 240), (790, 1700, 915, 1830))
+        shifted.paste(share.crop((810, 1720, 895, 1810)), (820, 1630))
+        self.assertEqual(bot.treasure_share_target(shifted), (862, 1675))
+        self.assertIsNone(bot.treasure_share_target(share.resize((540, 1170))))
+        for name in ('claim-result', 'claimed', 'reward', 'page'):
+            with self.subTest(name=name):
+                frame = Image.open(bot.ROOT / f'artifacts/treasure-{name}.png').convert('RGB')
+                self.assertIsNone(bot.treasure_share_target(frame))
+
+    def test_claim_shares_before_closing_and_waits_for_confirmation(self):
+        completed, detail, reward, cleared = [
+            Image.open(bot.ROOT / f'artifacts/treasure-{name}.png').convert('RGB')
+            for name in ('completed', 'claim-result', 'reward', 'claimed-map')]
+        share = Image.open(bot.ROOT / 'tests/fixtures/treasure-share-5554.png').convert('RGB')
+        shared = Image.open(bot.ROOT / 'tests/fixtures/treasure-shared-5554.png').convert('RGB')
+        with (patch.object(bot, 'task_screen', side_effect=[detail, reward, share, share, shared, cleared]),
+              patch.object(bot, 'task_tap') as tap):
+            self.assertIs(bot.claim_treasure('test', completed), cleared)
+        self.assertEqual(tap.call_args_list, [call('test', 465, 715), call('test', 540, 1490),
+                         call('test', 540, 2100), call('test', 852, 1765), call('test', 960, 640)])
+        with (patch.object(bot, 'task_screen', side_effect=[detail, reward, share] + [share] * 5),
+              patch.object(bot, 'task_tap') as tap,
+              self.assertRaisesRegex(RuntimeError, '分享按钮消失')):
+            bot.claim_treasure('test', completed)
+        self.assertEqual(tap.call_args_list[-1], call('test', 852, 1765))
+
     def test_completed_treasure_claims_with_no_remaining_attempts(self):
         frames = [Image.open(bot.ROOT / f'artifacts/treasure-{name}.png').convert('RGB')
                   for name in ('completed', 'claim-result', 'reward', 'claimed')]
@@ -306,8 +404,9 @@ class TreasureTest(unittest.TestCase):
               patch.object(bot, 'task_screen', side_effect=[completed, detail, reward, claimed, cleared, drawer]),
               patch.object(bot, 'task_tap') as tap):
             self.assertIs(bot.run_treasure('test', None, None, drawer), drawer)
-        self.assertEqual([c.args[1:] for c in tap.call_args_list],
-                         [(605, 1408), (465, 715), (540, 1490), (540, 2100), (960, 640), (60, 190)])
+        self.assert_completed_drawer_entry(tap)
+        self.assertEqual([c.args[1:] for c in tap.call_args_list[1:]],
+                         [(465, 715), (540, 1490), (540, 2100), (960, 640), (60, 190)])
         with (patch.object(bot, 'task_tap') as tap,
               self.assertRaisesRegex(RuntimeError, '未找到打勾宝箱')):
             bot.claim_treasure('test', cleared)

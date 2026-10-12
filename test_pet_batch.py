@@ -39,6 +39,7 @@ class PetBatchTest(unittest.TestCase):
             'forced_offline': lambda *_: False,
             'recover_task_city': self.recover,
             'run': lambda _, seconds, *a, **kw: self.clock.sleep(seconds),
+            'save_task_failure': lambda *_: '失败截图：test.png',
             'maybe_cleanup_diagnostic_screenshots': lambda: None,
         }
         for name, replacement in replacements.items():

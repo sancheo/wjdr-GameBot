@@ -27,8 +27,6 @@ glyphs = {
     'clock': ((1241, 299, 1265, 323), (102, 121, 157)),
     'info': ((1326, 789, 1351, 814), (111, 126, 168)),
     'document': ((746, 850, 792, 898), (177, 188, 210)),
-    'chevron': ((662, 178, 681, 191), (45, 109, 255)),
-    'stepper': ((1438, 523, 1459, 551), (80, 100, 145)),
 }
 for name, (box, ink) in glyphs.items():
     crop = source.crop(box)
@@ -40,14 +38,7 @@ for name, (box, ink) in glyphs.items():
     crop.putdata(pixels)
     crop.save(OUT / f'{name}.png')
 
-play = source.crop((1350, 171, 1370, 193))
-play.putdata([(255, 255, 255, max(0, min(255, round((r - 48) / 207 * 255))))
-              for r, g, b, a in play.getdata()])
-play.save(OUT / 'play.png')
-
 logo = Image.open(ROOT / 'assets/gamebot-logo.webp').convert('RGBA')
 logo.save(ROOT / 'assets/gamebot-icon.png')
-# The visible macOS icon occupies 80% of its square canvas, like standard Dock icons.
-dock = Image.new('RGBA', (512, 512))
-dock.alpha_composite(logo.resize((410, 410), Image.Resampling.LANCZOS), (51, 51))
-dock.save(ROOT / 'assets/gamebot-dock.png')
+logo.save(ROOT / 'assets/gamebot-icon.ico', format='ICO',
+          sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])

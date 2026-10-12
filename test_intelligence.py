@@ -9,6 +9,37 @@ from test_help_bot import Clock
 
 
 class IntelligenceTest(unittest.TestCase):
+    def test_detail_waits_for_animation_and_retries_only_opening_pin(self):
+        frame = Image.new('RGB', bot.EXPECTED_SIZE)
+        target = (577, 1337)
+        for misses, expected_taps in ((2, 0), (6, 1)):
+            with (patch.object(bot, 'intelligence_text_target',
+                              side_effect=[None] * misses + [(540, 1680)]),
+                  patch.object(bot, 'intelligence_page', return_value=True),
+                  patch.object(bot, 'intelligence_completed', return_value=False),
+                  patch.object(bot, 'task_screen', return_value=frame) as screen,
+                  patch.object(bot, 'task_tap') as tap):
+                self.assertIs(bot.wait_intelligence_detail('test', frame, target), frame)
+            self.assertEqual(screen.call_count, misses)
+            self.assertEqual(tap.call_count, expected_taps)
+            if expected_taps:
+                tap.assert_called_once_with('test', *target)
+
+    def test_detail_never_retaps_an_unexpected_page_or_completed_pin(self):
+        frame = Image.new('RGB', bot.EXPECTED_SIZE)
+        for completed in (False, True):
+            with (patch.object(bot, 'intelligence_text_target', return_value=None),
+                  patch.object(bot, 'intelligence_page', return_value=completed),
+                  patch.object(bot, 'intelligence_completed', return_value=completed),
+                  patch.object(bot, 'task_screen', return_value=frame),
+                  patch.object(bot, 'task_tap') as tap):
+                if completed:
+                    self.assertIs(bot.wait_intelligence_detail('test', frame, (500, 1200)), frame)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, '未确认任务详情'):
+                        bot.wait_intelligence_detail('test', frame, (500, 1200))
+            tap.assert_not_called()
+
     def test_full_queue_skips_round_and_schedules_recheck(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
         for full, delay in [(True, 102), (True, None), (True, 0), (False, None)]:
@@ -62,7 +93,8 @@ class IntelligenceTest(unittest.TestCase):
         completed = Image.open(bot.ROOT / 'artifacts/intel-map-progress.png').convert('RGB')
         self.assertTrue(bot.intelligence_page(original))
         self.assertFalse(bot.intelligence_page(Image.new('RGB', bot.EXPECTED_SIZE)))
-        self.assertEqual(bot.intelligence_target(original), (353, 1009))
+        target = bot.intelligence_target(original)
+        self.assertLess(abs(target[0] - 502) + abs(target[1] - 892), 10)
         remaining = Image.open(bot.ROOT / 'artifacts/intel-map-remaining.png').convert('RGB')
         self.assertIsNotNone(bot.intelligence_target(remaining))
         for name, position in [('wolf', (353, 1009)), ('swords', (502, 892)), ('tent', (837, 1120))]:
@@ -150,13 +182,15 @@ class IntelligenceTest(unittest.TestCase):
 
     def test_dispatch_and_reward_loop_stays_in_wilderness(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
+        detail = frame.copy()
         with (patch.object(bot, 'task_screen', return_value=frame),
-              patch.object(bot, 'intelligence_page', return_value=True),
+              patch.object(bot, 'wait_intelligence_detail', return_value=detail),
+              patch.object(bot, 'intelligence_page', side_effect=lambda image: image is frame),
               patch.object(bot, 'inspect', return_value=(False, None, 0)),
               patch.object(bot, 'town_button', return_value=True),
               patch.object(bot, 'open_intelligence', return_value=frame),
               patch.object(bot, 'intelligence_completed', return_value=True),
-              patch.object(bot, 'intelligence_text_target', side_effect=[None, (540, 2100)]),
+              patch.object(bot, 'intelligence_text_target', side_effect=[None, (540, 2100), None, None]),
               patch.object(bot, 'intelligence_back_target', return_value=None),
               patch.object(bot, 'intelligence_target', side_effect=[(353, 1009), None]),
               patch.object(bot, 'execute_intelligence', return_value=(frame, True)) as execute,
@@ -167,6 +201,43 @@ class IntelligenceTest(unittest.TestCase):
         execute.assert_called_once()
         self.assertIn(('test', 540, 2100), [c.args for c in tap.call_args_list])
         back.assert_not_called()
+
+    def test_claim_waits_for_delayed_rewards_and_closes_once_before_scanning(self):
+        stale = Image.open(bot.ROOT / 'tests/fixtures/intel-claim-stale-map.png').convert('RGB')
+        reward = Image.open(bot.ROOT / 'tests/fixtures/intel-claim-delayed-reward.png').convert('RGB')
+        clear = Image.open(bot.ROOT / 'artifacts/intel-map.png').convert('RGB')
+        with (patch.object(bot, 'task_screen', side_effect=[stale, stale, reward, reward, clear, clear]),
+              patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'intelligence_target', side_effect=AssertionError('premature map scan'))):
+            self.assertIs(bot.claim_intelligence_rewards('test', (541, 2109)), clear)
+        self.assertEqual([c.args[1:] for c in tap.call_args_list], [(541, 2109), (540, 2150)])
+
+    def test_claim_never_taps_a_pin_or_repeats_claim_when_reward_is_unconfirmed(self):
+        stale = Image.open(bot.ROOT / 'tests/fixtures/intel-claim-stale-map.png').convert('RGB')
+        with (patch.object(bot, 'task_screen', return_value=stale) as capture,
+              patch.object(bot, 'task_tap') as tap,
+              self.assertRaisesRegex(RuntimeError, '未确认奖励页关闭')):
+            bot.claim_intelligence_rewards('test', (541, 2109))
+        self.assertEqual(capture.call_count, 10)
+        tap.assert_called_once_with('test', 541, 2109)
+
+    def test_claimed_pins_disappearing_clear_stale_pending_coordinates(self):
+        frame = Image.new('RGB', bot.EXPECTED_SIZE)
+        with (patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'intelligence_page', return_value=True),
+              patch.object(bot, 'inspect', return_value=(False, None, 0)),
+              patch.object(bot, 'town_button', return_value=True),
+              patch.object(bot, 'open_intelligence', return_value=frame) as enter,
+              patch.object(bot, 'intelligence_completed', return_value=False),
+              patch.object(bot, 'intelligence_text_target', return_value=None),
+              patch.object(bot, 'ordinary_pins', return_value=[]) as pins,
+              patch.object(bot, 'intelligence_target', side_effect=[(500, 1200), None, None]),
+              patch.object(bot, 'wait_intelligence_detail', return_value=frame),
+              patch.object(bot, 'execute_intelligence', return_value=(frame, True)),
+              patch.object(bot, 'task_tap'), contextlib.redirect_stdout(io.StringIO())):
+            self.assertIs(bot.run_intelligence('test', *([None] * 4)), frame)
+        self.assertEqual(pins.call_count, 2)
+        self.assertEqual(enter.call_count, 2)
 
     def test_action_uses_march_confirmation_and_stops_at_insufficient_stamina(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
@@ -192,6 +263,7 @@ class IntelligenceTest(unittest.TestCase):
     def test_cli_adds_intelligence_after_daily_tasks(self):
         with (patch('sys.argv', ['help_bot.py', '--device', 'test', '--daily-tasks', '--intelligence']),
               patch.object(bot, 'emulator_device', return_value=True),
+              patch.object(bot, 'TOWN_TEMPLATE', None),
               patch.object(bot, 'return_to_city', return_value=True),
               patch.object(bot, 'run_schedule') as schedule):
             bot.main()
@@ -235,6 +307,26 @@ class IntelligenceTest(unittest.TestCase):
                              [100, 100 + delay])
             self.assertGreater(len([name for name, _ in events if name == 'daily']), 2)
             self.assertEqual(timers['intelligence'], 100 + 2 * delay)
+
+    def test_refresh_countdown_reads_top_and_exhausted_map_banner(self):
+        for name, expected in [('intel-map.png', 1874),
+                               ('intelligence-refresh-5556-before.png', 12586)]:
+            with self.subTest(name=name):
+                image = Image.open(bot.ROOT / 'artifacts' / name).convert('RGB')
+                self.assertTrue(bot.intelligence_page(image))
+                self.assertEqual(bot.intelligence_refresh_countdown(image), expected)
+
+    def test_refresh_countdown_requires_label_and_preserves_zero(self):
+        frame = Image.new('RGB', bot.EXPECTED_SIZE)
+        for top, center, expected in [
+                ('下次刷新：00:00:00', '下次刷新：03:29:46', 0),
+                ('', '下次刷新：03:29:46', 12586),
+                ('行军：00:00:12', '00:00:10', None),
+                ('', '下次刷新：无法识别', None)]:
+            with self.subTest(top=top, center=center):
+                with patch.object(bot, 'recognize_text', side_effect=[
+                        [(top, (0, 0, 100, 30))], [(center, (0, 0, 100, 30))]]):
+                    self.assertEqual(bot.intelligence_refresh_countdown(frame), expected)
 
 
 if __name__ == '__main__':

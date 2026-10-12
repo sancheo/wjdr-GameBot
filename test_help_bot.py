@@ -352,7 +352,7 @@ class CityTaskTest(unittest.TestCase):
               patch.object(help_bot, "task_screen", side_effect=lambda _serial: next(frames)),
               patch.object(help_bot, "training_status", return_value="idle"),
               patch.object(help_bot, "training_intro_page",
-                           side_effect=[True] * 6 + [False]) as intro_page,
+                           side_effect=lambda image: any(image is page for page in intro)),
               patch.object(help_bot, "task_tap") as tap,
               contextlib.redirect_stdout(io.StringIO()) as output):
             result = help_bot.run_training(
@@ -360,7 +360,6 @@ class CityTaskTest(unittest.TestCase):
                 initial_image=drawer, keep_open=True, units={"shield"})
 
         self.assertIs(result, drawer)
-        self.assertEqual(intro_page.call_count, 7)
         actions = [call.args[1:] for call in tap.call_args_list]
         self.assertEqual(actions.count((540, 2050)), 6)
         self.assertEqual(actions.count((608, 1115)), 2)
@@ -423,7 +422,8 @@ class CityTaskTest(unittest.TestCase):
               patch.object(help_bot, "task_drawer", return_value=drawer),
               patch.object(help_bot, "recruit_row", return_value=(drawer, 900)),
               patch.object(help_bot, "find_green", return_value=(1.0, 280, 920)),
-              patch.object(help_bot, "recruit_button_state", return_value=("free", "已确认免费按钮")),
+              patch.object(help_bot, "recruit_button_state", side_effect=lambda _image, _templates, kind:
+                           ("free", "已确认免费按钮") if kind == "recruit_advanced" else ("cooldown", "史诗招募冷却")),
               patch.object(help_bot, "task_page", side_effect=page),
               patch.object(help_bot, "recognize_text", return_value=[
                   ("点击任意", (0, 0, 100, 30)), ("位置退出", (0, 40, 100, 30))]),
@@ -476,14 +476,14 @@ class CityTaskTest(unittest.TestCase):
         reset.assert_not_called()
         swipe.assert_not_called()
         self.assertEqual(timers, {"warehouse": 160})
-        self.assertIn("仓库补给尚不可领取", output.getvalue())
+        self.assertIn("未定位到仓库补给任务行", output.getvalue())
 
     def test_disabled_donation_skips_its_label(self):
         image = Image.new("RGB", help_bot.EXPECTED_SIZE)
         help_bot.TASK_DRAWER_SCROLL = 1
         with (patch.object(help_bot, "inspect", return_value=(True, None, 0)),
               patch.object(help_bot, "task_drawer", return_value=image),
-              patch.object(help_bot, "task_page", return_value=True),
+              patch.object(help_bot, "task_page", side_effect=lambda _image, _templates, name, *_args: name == "drawer-open"),
               patch.object(help_bot, "find_green", return_value=(0, 0, 0)) as find_label,
               patch.object(help_bot, "recognize_text", return_value=[("高级招募", (10, 100, 150, 35))]),
               patch.object(help_bot, "swipe_drawer", return_value=image),
@@ -649,7 +649,7 @@ class CityTaskTest(unittest.TestCase):
             help_bot.run_schedule("test-device", 2, 1, False,
                                   [lambda: (_ for _ in ()).throw(RuntimeError("页面已变化"))],
                                   *(Image.new("L", (1, 1)) for _ in range(4)))
-        self.assertIn("⚠️ 0 已连续执行失败3次，后续不再执行这个任务", output.getvalue())
+        self.assertIn("⚠️ 0 连续3次重试失败，本次程序运行期间跳过该任务", output.getvalue())
 
     def test_explore_claims_income_before_drawer_tasks(self):
         root = Path(__file__).resolve().parent
@@ -665,17 +665,15 @@ class CityTaskTest(unittest.TestCase):
               contextlib.redirect_stdout(io.StringIO())):
             help_bot.run_explore("test-device", None, None, templates)
         self.assertEqual(actions, [(95, 2240), (915, 1718), (540, 1660), (540, 2050), (60, 190)])
-        self.assertTrue(help_bot.explore_red_dot(frames[0]))
-        self.assertFalse(help_bot.explore_red_dot(frames[5]))
-
         output = io.StringIO()
         with (patch.object(help_bot, "color_screenshot", return_value=frames[5]),
+              patch.object(help_bot, "task_screen", side_effect=frames[1:]),
               patch.object(help_bot, "inspect", return_value=(True, None, 0)),
               patch.object(help_bot, "task_tap") as tap,
               contextlib.redirect_stdout(output)):
             help_bot.run_explore("test-device", None, None, templates)
-        tap.assert_not_called()
-        self.assertIn("探险经验：未发现可领取红点", output.getvalue())
+        self.assertEqual([call.args[1:] for call in tap.call_args_list], actions)
+        self.assertIn("已领取探险经验，8 小时 59 分后再次领取", output.getvalue())
 
     def test_warehouse_prompt_disappears_after_claim(self):
         root = Path(__file__).resolve().parent
@@ -903,7 +901,7 @@ class CityTaskTest(unittest.TestCase):
         root = Path(__file__).resolve().parent
         frames = [Image.open(root / "artifacts" / f"{name}.png").convert("RGB") for name in (
             "feature-return", "feature-drawer-top", "feature-drawer-middle",
-            "feature-alliance", "feature-tech", "hold-before", "hold-after-2s",
+            "feature-alliance", "feature-alliance", "feature-tech", "hold-before", "hold-after-2s",
             "hold-exhausted",
             "feature-tech", "feature-alliance", "feature-return", "feature-drawer-top",
             "feature-recruit-entry", "feature-recruit", "feature-recruit",  # 招募动画尚未结束

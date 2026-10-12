@@ -1,74 +1,63 @@
-# Windows 安装与开发
+# Windows 开发补充
 
-项目支持 Windows 和 macOS，共用任务逻辑、素材与截图测试。Windows 使用 `adb.exe` 和本地 RapidOCR；macOS 继续使用 `adb` 和 Vision。模拟器需保持游戏在前台，分辨率为 **1080×2340**，游戏界面布局需与现有模板一致。
+便携版安装、模拟器配置和首次启动见 [README 的安装与使用](README.md#安装与使用)，版本发布见 [README 的发布说明](README.md#发布新版本维护者)。本文保留 Windows 平台的工具查找、编译环境与实现约定。开发验证使用项目 `.venv` 运行 `python run_tests.py --suite fast`；完整离线回归使用 `--suite all`，固定截图样本见 `tests/fixtures/README.md`。
 
-第一次安装请优先按照 [README.md](README.md) 中“安装与环境配置”的 7 个步骤操作。本文补充 Windows 平台的启动、OCR 实现和开发验证信息。
+## ADB 查找与配置
 
-## 安装
-
-建议使用 64 位 Python 3.12（包含 Tcl/Tk 和 pip）。在项目目录打开 PowerShell：
-
-```powershell
-py -3.12 --version
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-如果 `py` 不可用，用已安装的 `python` 或 Python 完整路径代替。`.venv` 只适用于创建它的电脑和项目路径；移动项目或换电脑后需要删除旧环境并重新创建，不能复制复用。
-
-ADB 按下列顺序查找，无需修改源码：
+`platform_support.py` 按以下顺序选择 Windows ADB：
 
 1. 环境变量 `GAMEBOT_ADB` 指定的可执行文件。
-2. 项目 `.tools/platform-tools/adb.exe`（macOS 为 `adb`）。
-3. `ANDROID_HOME` 或 `ANDROID_SDK_ROOT` 下的 `platform-tools`。
-4. Windows 默认 SDK 路径 `%LOCALAPPDATA%\Android\Sdk\platform-tools`。
-5. 系统 `PATH`。
+2. 项目 `.tools/platform-tools/adb.exe`。
+3. `ANDROID_HOME` 下的 `platform-tools/adb.exe`，然后是 `ANDROID_SDK_ROOT` 下的同名文件。
+4. Windows 默认 SDK 路径 `%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe`。
+5. 系统 `PATH` 中的 `adb.exe`。
 
-Windows 版 `adb.exe` 和相关 DLL 未纳入 Git。新机器可复用 Android Studio 的 SDK，或从 [Android 官方 Platform Tools](https://developer.android.com/tools/releases/platform-tools) 下载。若放入项目工具目录，`adb.exe`、`AdbWinApi.dll`、`AdbWinUsbApi.dll` 必须来自同一份 Windows Platform Tools；不要把 macOS 的 `adb` 改名为 `adb.exe`。
+`GAMEBOT_ADB` 设置后直接使用指定路径；路径无效时不会继续查找其他位置。其余候选路径只在文件存在时选用。全部找不到时返回项目工具目录的路径，由后续调用报告错误。
 
-自定义 ADB 示例：
+在 PowerShell 中临时指定 ADB：
 
 ```powershell
 $env:GAMEBOT_ADB = 'D:\Android SDK\platform-tools\adb.exe'
 ```
 
-## 启动
+Windows 版 `adb.exe` 和相关 DLL 未纳入 Git。可使用 Android Studio 的 SDK，或下载 [Android 官方 Platform Tools](https://developer.android.com/tools/releases/platform-tools)。放入项目工具目录时，`adb.exe`、`AdbWinApi.dll`、`AdbWinUsbApi.dll` 必须来自同一份 Windows Platform Tools。
 
-先启动模拟器和游戏，并确认游戏停留在主城。然后双击项目目录中的 `start_windows.cmd`，或运行：
+## 桌面程序与编译环境
 
-```powershell
-.\.venv\Scripts\python.exe gui.py
-```
+Windows 界面由 `desktop/GameBot.cs` 编译的 EXE 承载 WebView2，页面资源位于 `assets/desktop.html` 和 `assets/desktop/`，Python 后台位于 `gui_web.py`。源码开发使用项目 `.venv`；便携发行版使用 `runtime/python` 内置的独立 Python、`runtime/webview-sdk` 和 `runtime/webview2`，无需用户安装 Python 或 WebView2。EXE 应保留在完整程序目录中。便携包构建命令见 [README 的发布说明](README.md#发布新版本维护者)，使用方法见 [安装与使用](README.md#安装与使用)。
 
-GUI 会列出已连接模拟器。序列号可能随模拟器重启变化，请点击“刷新”。如需在命令行查询与验证：
+`build_desktop.ps1` 使用 Windows 自带的 .NET Framework x64 C# 编译器，WebView2 SDK DLL 来自 `pywebview` 的 `webview/lib` 目录。编译无需安装 Visual Studio、Rust 或 Node。运行需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)。
 
-```powershell
-.\.venv\Scripts\python.exe -c "from gui import discover_emulators; print(discover_emulators())"
-.\.venv\Scripts\python.exe help_bot.py --self-test
-.\.venv\Scripts\python.exe help_bot.py --duration 60 --dry-run
-```
-
-只有一台已连接模拟器时无需指定序列号；多台时添加 `--device emulator-5556`（替换为实际序列号）。只观察模式不操作页面，需要手动停留在主城；普通运行会执行已有的主城恢复逻辑。
-
-需要持续运行日常任务时，在 GUI 中选择任务后点击“启动”，或运行：
+修改 `desktop/GameBot.cs` 后，在项目目录重新编译：
 
 ```powershell
-.\.venv\Scripts\python.exe help_bot.py --daily-tasks --forever --reconnect-minutes 1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_desktop.ps1
 ```
 
-点击“停止”或在命令行按 Ctrl-C 结束。ADB 与后台任务在 Windows 隐藏控制台窗口，GUI 与子进程统一使用 UTF-8，支持中文和警告符号。
+若 `GameBot.exe` 正在运行、无法覆盖，编译脚本会生成 `GameBot.next.exe`。`start_windows.cmd` 调用 `launch_desktop.ps1`，在 EXE 缺失或 C# 源码更新时自动编译，并选择 `GameBot.exe` 与 `GameBot.next.exe` 中较新的版本启动。更新后先停止旧窗口中的任务，再通过启动脚本打开新窗口。
 
-## OCR 与验证
+修改 HTML、CSS、JS 或 Python 脚本后，停止任务并重新打开桌面程序即可。依赖变更时按 README 重新安装 `requirements.txt`。
 
-`ocr_backend.py` 保持 `[(文字, (x, y, 宽, 高)), ...]` 返回格式，坐标相对于传入图片左上角。Windows 使用固定版本 `rapidocr-onnxruntime==1.4.4`，模型随依赖安装，识别时在本机 CPU 运行，不上传截图。引擎首次使用时加载并复用。输入放大两倍后识别，输出坐标还原，并合并同一行的相邻文字框，以兼容“1天 + 时分秒”“冷却中 + 倒计时”等拆行结果。参考 [RapidOCR API 文档](https://rapidai.github.io/RapidOCRDocs/v1.4.4/install_usage/api/RapidOCR/)。
+## OCR 实现约定
 
-```powershell
-.\.venv\Scripts\python.exe -X utf8 -m unittest test_help_bot test_schedule test_platform_support -v
-$env:GAMEBOT_GUI_TEST = '1'
-.\.venv\Scripts\python.exe -X utf8 -m unittest test_gui -v
-```
+`ocr_backend.py` 提供统一的 `recognize_text(image)` 接口，返回 `[(文字, (x, y, 宽, 高)), ...]`，坐标以传入图片左上角为原点。
 
-2026-09-29 本机验证：Python 3.12.14、Pillow 11.3.0、RapidOCR 1.4.4；94 项任务/调度/平台测试通过。此前的 3 项 GUI 测试也已通过。测试覆盖真实截图中的中文、跨天倒计时、宠物冷却、建筑升级，以及英文 OCR、坐标转换、ADB 查找和 UTF-8 日志。`--self-test` 和已连接模拟器的 60 秒只观察运行通过。实时打开、滚动和收起任务抽屉，识别到兵种状态、联盟捐献、免费招募与跨天倒计时，并确认返回主城；此次实时检查没有领取或消耗资源。macOS 分支保留原实现，本次未在 macOS 实机重跑；长期自动日常任务仍需实际运行观察。
+Windows 使用固定版本 `rapidocr-onnxruntime==1.4.4`，模型随依赖安装，在本机 CPU 上识别。引擎首次使用时加载并缓存复用，截图不上传。macOS 使用 Vision。
 
-`artifacts/` 是测试使用的真实模拟器截图，也可能包含角色或聊天信息。分享压缩包前请自行核对。
+Windows 识别流程将图片转换为 RGB、宽高各放大两倍，再以 PNG 字节送入引擎；输出坐标还原到原图，并裁剪到图片范围。`merge_text_lines` 合并同一行的相邻文字框，以兼容“1天 + 时分秒”“冷却中 + 倒计时”等拆分结果。修改 OCR 时需保留上述返回格式与坐标约定，避免影响倒计时解析和目标定位。
+
+## 主要模块职责
+
+| 文件 | 职责 |
+| --- | --- |
+| `platform_support.py` | ADB 路径查找、Windows 子进程处理与 UTF-8 输出配置。 |
+| `gui_web.py` | 桌面界面的 Python 后台接口与任务进程管理。 |
+| `app_updates.py`、`app_version.py` | GitHub 正式版本检查、下载校验、更新准备和版本标识。 |
+| `desktop/Updater.cs` | 独立更新器，替换程序与运行环境，执行启动检查并在失败时回滚。 |
+| `task_scheduler.py` | 日常任务调度。 |
+| `runtime_control.py` | 停止及单项重试协议。 |
+| `device_lease.py` | 系统级模拟器互斥，防止多个任务进程同时控制同一模拟器。 |
+| `task_status.py` | 任务状态消息校验。 |
+| `image_matching.py` | 模板缓存、平均绝对差和 Dice 匹配；保持既有阈值与同分时的坐标顺序。 |
+| `help_bot.py` | 任务入口与兼容接口。 |
+| `ocr_backend.py` | Windows RapidOCR 与 macOS Vision 的统一识别接口。 |
