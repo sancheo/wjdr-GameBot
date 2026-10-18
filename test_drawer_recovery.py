@@ -4,9 +4,33 @@ from unittest.mock import call, patch
 
 from PIL import Image
 import help_bot as bot
+from screen_geometry import detect
 
 
 class DrawerRecoveryTest(unittest.TestCase):
+    def test_wilderness_tab_is_switched_before_city_tasks_and_resets_scroll(self):
+        with Image.open(bot.ROOT / 'tests/fixtures/nox/drawer-wilderness-1019-native.png') as raw:
+            raw = raw.convert('RGB')
+            wild = detect(raw).normalize(raw)
+        with Image.open(bot.ROOT / 'tests/fixtures/nox/drawer-city-1019.png') as raw:
+            city = raw.convert('RGB')
+        with (patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'task_screen', side_effect=[wild, city]),
+              patch.object(bot, 'swipe_drawer', side_effect=AssertionError('must switch tab first'))):
+            self.assertIs(bot.reset_drawer('test', wild, {'drawer-open': self.template}), city)
+        tap.assert_called_once_with('test', 180, 680)
+        self.assertEqual(bot.TASK_DRAWER_SCROLL, 0)
+        with patch.object(bot, 'task_tap') as tap:
+            self.assertIs(bot.city_drawer_tab('test', city, self.template), city)
+        tap.assert_not_called()
+
+        with (patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'task_screen', return_value=wild),
+              self.assertRaisesRegex(RuntimeError, '未能确认.*城镇标签')):
+            bot.city_drawer_tab('test', wild, self.template)
+        tap.assert_called_once_with('test', 180, 680)
+        self.assertIsNone(bot.TASK_DRAWER_SCROLL)
+
     def setUp(self):
         def frame(name):
             with Image.open(bot.ROOT / name) as image:

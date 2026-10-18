@@ -71,12 +71,15 @@ class TroopUpgradeTest(unittest.TestCase):
                 selected = frame("shield-selected") if promote else ready
                 busy = selected.copy()
                 busy.putpixel((400, 1900), (80, 100, 120))
-                frames = [city, ready]
+                # The drawer arrow can first yield a camera-transition frame.
+                transition = Image.new('RGB', bot.EXPECTED_SIZE)
+                frames = [transition, city, ready]
                 if promote:
                     frames += [selected, frame("shield-dialog")]
                 frames += [busy, city, city]
                 with (patch.object(bot, "reset_drawer", return_value=drawer),
-                      patch.object(bot, "inspect", return_value=(True, None, 0)),
+                      patch.object(bot, "inspect", side_effect=lambda image, *_:
+                                   (image.getbbox() is not None, None, 0)),
                       patch.object(bot, "task_drawer", return_value=drawer),
                       patch.object(bot, "training_status", return_value="idle"),
                       patch.object(bot, "task_screen", side_effect=frames),
@@ -93,7 +96,7 @@ class TroopUpgradeTest(unittest.TestCase):
                 self.assertEqual((775, 1630) in actions, promote)
                 self.assertEqual((795, 2100) in actions, not promote)
                 self.assertIn((60, 190), actions)
-                self.assertEqual("⚠️ 城内无可升级兵种" in output.getvalue(), not promote)
+                self.assertEqual("城内暂无可晋升的低级兵" in output.getvalue(), not promote)
 
 
 if __name__ == "__main__":

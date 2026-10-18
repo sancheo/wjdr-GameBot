@@ -12,6 +12,20 @@ from screen_geometry import detect
 
 
 class TreasureTest(unittest.TestCase):
+    def test_active_point_is_closed_and_excluded_without_retrying_dispatch(self):
+        with Image.open(bot.ROOT / 'tests/fixtures/nox/treasure-active-1019-native.png') as raw:
+            raw = raw.convert('RGB')
+            active = detect(raw).normalize(raw)
+        page = Image.open(bot.ROOT / 'tests/fixtures/treasure-map-1015.png').convert('RGB')
+        self.assertIsNotNone(bot.intelligence_text_target(active, ('寻宝中',), (350, 680, 730, 810)))
+        self.assertIsNone(bot.treasure_action_target(active, '寻宝派遣'))
+        with (patch.object(bot, 'task_screen', side_effect=[active, page]),
+              patch.object(bot, 'task_tap') as tap):
+            image, notice = bot.dispatch_treasure('test', (400, 900))
+        self.assertIs(image, page)
+        self.assertEqual(notice, 'unavailable')
+        self.assertEqual(tap.call_args_list, [call('test', 400, 900), call('test', 960, 680)])
+
     def test_nox_advanced_claim_shares_and_continues_to_map(self):
         frames = []
         for name in ('share', 'shared', 'returned'):
@@ -484,7 +498,8 @@ class TreasureTest(unittest.TestCase):
                 patch.object(bot, 'intelligence_text_target', side_effect=lambda _image, labels, _box:
                              {'可寻宝': (300, 955), '寻宝派遣': (540, 1850),
                               '开始寻宝': (540, 1760),
-                              '寻宝中': (540, 750) if active else None}.get(labels[0])),
+                              '寻宝中': (540, 750) if active and call('test', 540, 1760)
+                              in tap.call_args_list else None}.get(labels[0])),
                 patch.object(bot, 'treasure_remaining', side_effect=
                              [remaining, None, after] if active else [remaining] + [after] * 5),
                 patch.object(bot, 'treasure_chest_target', return_value=(381, 774)),

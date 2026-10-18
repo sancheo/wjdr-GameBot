@@ -407,6 +407,7 @@ def task_page(image, templates, name, limit=12):
 
 
 def task_screen(serial, help_enabled=True):
+    global TASK_DRAWER_SCROLL
     time.sleep(1)
     image = color_screenshot(serial)
     check_game_guide(image)
@@ -471,13 +472,16 @@ def task_screen(serial, help_enabled=True):
             post = color_screenshot(serial)
             if not task_page(post, {"drawer-open": drawer_template}, "drawer-open"):
                 raise RuntimeError("互助后未能恢复主城任务抽屉，已停止")
-            for _ in range(TASK_DRAWER_SCROLL or 0):
+            expected_scroll = TASK_DRAWER_SCROLL or 0
+            post = city_drawer_tab(serial, post, drawer_template)
+            for _ in range(expected_scroll):
                 adb(serial, "shell", "input", "swipe", "400", DRAWER_SWIPE_START,
                     "400", DRAWER_SWIPE_END, DRAWER_SWIPE_MS)
                 time.sleep(.5)
                 post = color_screenshot(serial)
                 if not task_page(post, {"drawer-open": drawer_template}, "drawer-open"):
                     raise RuntimeError("互助后恢复抽屉滚动位置失败，已停止")
+            TASK_DRAWER_SCROLL = expected_scroll
     if not was_chat and confirmed:
         print("任务期间已确认一次联盟互助", flush=True)
     return check_wilderness_healing(serial, post)
@@ -1837,6 +1841,38 @@ def run_explore(serial, help_template, nav_template, templates, timers=None):
     return image
 
 
+def city_drawer_tab(serial, image, drawer_template):
+    """A visible collapse handle confirms either tab, not the city task list."""
+    global TASK_DRAWER_SCROLL
+
+    def tab_brightness(frame):
+        left = ImageStat.Stat(frame.crop((60, 650, 110, 705)).convert("RGB")).mean
+        right = ImageStat.Stat(frame.crop((390, 650, 440, 705)).convert("RGB")).mean
+        return left, right
+
+    def wilderness(frame):
+        left, right = tab_brightness(frame)
+        if right[1] <= left[1] + 35 or right[2] <= left[2] + 35:
+            return False
+        labels = {text.replace(" ", "") for text, _ in
+                  recognize_text(frame.crop((100, 640, 570, 720)))}
+        return {"城镇", "野外"} <= labels
+
+    if not wilderness(image):
+        return image
+    task_tap(serial, 180, 680)
+    TASK_DRAWER_SCROLL = 0
+    for _ in range(5):
+        image = task_screen(serial, help_enabled=False)
+        left, right = tab_brightness(image)
+        if (task_page(image, {"drawer-open": drawer_template}, "drawer-open")
+                and left[1] > right[1] + 35 and left[2] > right[2] + 35):
+            print("主城抽屉已从野外切换到城镇任务列表", flush=True)
+            return image
+    TASK_DRAWER_SCROLL = None
+    raise RuntimeError("未能确认主城抽屉已切换到城镇标签")
+
+
 def task_drawer(serial, image, templates, reset_unknown=True, _reopen_frozen=True):
     global TASK_DRAWER_SCROLL
     check_game_guide(image)
@@ -1866,7 +1902,7 @@ def task_drawer(serial, image, templates, reset_unknown=True, _reopen_frozen=Tru
                 time.sleep(1)
                 image = task_screen(serial, help_enabled=False)
                 if task_page(image, templates, "drawer-open"):
-                    return image
+                    return city_drawer_tab(serial, image, templates["drawer-open"])
                 if difference(image, frozen) >= .1 or not closed_city_drawer(image, templates["drawer-open"]):
                     frozen = None
                     break
@@ -1879,6 +1915,7 @@ def task_drawer(serial, image, templates, reset_unknown=True, _reopen_frozen=Tru
                 return task_drawer(serial, color_screenshot(serial), templates,
                                    reset_unknown=reset_unknown, _reopen_frozen=False)
         raise RuntimeError("未能确认主城抽屉已打开")
+    image = city_drawer_tab(serial, image, templates["drawer-open"])
     if TASK_DRAWER_SCROLL is None and reset_unknown:
         # 启动时已打开的抽屉可能停在任意位置，先回到顶部再记录滚动次数。
         TASK_DRAWER_SCROLL = DRAWER_SWIPES
@@ -1916,7 +1953,7 @@ def swipe_drawer(serial, drawer_template, reverse=False, recover_closed=True):
     image = task_screen(serial)
     for attempt in range(5):
         if task_page(image, {"drawer-open": drawer_template}, "drawer-open"):
-            return image
+            return city_drawer_tab(serial, image, drawer_template)
         if attempt < 4:
             image = task_screen(serial, help_enabled=False)
     # Reopening resets the real list to the top. Replay only the confirmed
@@ -2406,8 +2443,7 @@ def run_training(serial, help_template, nav_template, drawer_template, titles,
                 finishes.append(timers["train"])
             continue
         task_tap(serial, 608, y)
-        image = task_screen(serial)
-        city(image)
+        image = wait_city(task_screen(serial))
         if status == "completed":
             task_tap(serial, 530, 1090)
             image = task_screen(serial)
@@ -2415,8 +2451,7 @@ def run_training(serial, help_template, nav_template, drawer_template, titles,
             if training_status(image, y) != "idle":
                 raise RuntimeError(f"{unit_label}已完成队列领取后未变为空闲，已停止")
             task_tap(serial, 608, y)
-            image = task_screen(serial)
-            city(image)
+            image = wait_city(task_screen(serial))
             print(f"{unit_label}已领取完成的士兵", flush=True)
         task_tap(serial, 725, 1590)
         image = wait_training_entry(serial, task_screen(serial), titles[unit])
@@ -2435,8 +2470,7 @@ def run_training(serial, help_template, nav_template, drawer_template, titles,
                 city(image)
                 image = drawer(image)
                 task_tap(serial, 608, y)
-                image = task_screen(serial)
-                city(image)
+                image = wait_city(task_screen(serial))
                 task_tap(serial, 725, 1590)
                 image = wait_training_entry(serial, task_screen(serial), titles[unit])
         if not training_page(image, titles[unit]):
@@ -2466,7 +2500,7 @@ def run_training(serial, help_template, nav_template, drawer_template, titles,
                 print(f"{unit_label}已启动兵种升级，晋升至当前最高等级", flush=True)
                 upgraded = True
             else:
-                print("⚠️ 城内无可升级兵种，改为自动训练新兵，如需升级兵种请将低级兵召回", flush=True)
+                print(f"{unit_label}城内暂无可晋升的低级兵，自动训练最高可用等级新兵", flush=True)
         r, g, b = image.getpixel((400, 1900))
         if not upgraded and not (g > 180 and g > r + 100 and g > b + 80):
             raise RuntimeError(f"{unit_label}训练配置不在可启动状态，已停止")
@@ -2890,6 +2924,10 @@ def dispatch_treasure(serial, target):
             image = task_screen(serial)
             if stamina_refill_target(image) is not None:
                 return leave_treasure_stamina(serial, image), "stamina"
+            if label == "寻宝派遣" and intelligence_text_target(
+                    image, ("寻宝中",), (350, 680, 730, 810)) is not None:
+                print("该藏宝点正在寻宝，关闭详情并检查其他藏宝点", flush=True)
+                return close_treasure_to_map(serial, image), "unavailable"
             if label == "开始寻宝" and treasure_pets_unavailable(image):
                 print("该藏宝点的宠物实力不足或宠物忙碌，尝试其他藏宝点", flush=True)
                 return close_treasure_to_map(serial, image), "unavailable"
