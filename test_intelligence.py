@@ -239,6 +239,31 @@ class IntelligenceTest(unittest.TestCase):
         self.assertEqual(pins.call_count, 2)
         self.assertEqual(enter.call_count, 2)
 
+    def test_own_pending_march_yields_to_other_tasks_and_schedules_results(self):
+        field = Image.new('RGB', bot.EXPECTED_SIZE)
+        page = Image.new('RGB', bot.EXPECTED_SIZE, 'blue')
+        clock, timers = Clock(), {}
+        with (patch.object(bot.time, 'monotonic', clock.monotonic),
+              patch.object(bot, 'task_screen', return_value=field),
+              patch.object(bot, 'intelligence_page', side_effect=lambda image: image is page),
+              patch.object(bot, 'town_button', return_value=True),
+              patch.object(bot, 'intelligence_queue_full', return_value=False),
+              patch.object(bot, 'open_intelligence', return_value=page) as enter,
+              patch.object(bot, 'intelligence_refresh_countdown', return_value=900),
+              patch.object(bot, 'intelligence_completed', return_value=False),
+              patch.object(bot, 'intelligence_text_target', return_value=None),
+              patch.object(bot, 'ordinary_pins', return_value=[(500, 1200)]),
+              patch.object(bot, 'intelligence_target', side_effect=[(500, 1200), None]),
+              patch.object(bot, 'wait_intelligence_detail', return_value=page),
+              patch.object(bot, 'execute_intelligence', return_value=(field, True)) as execute,
+              patch.object(bot, 'task_tap') as tap,
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertIs(bot.run_intelligence('test', *([None] * 4), timers=timers), field)
+        self.assertEqual(timers['intelligence'], clock.now + 60)
+        self.assertEqual(enter.call_count, 2)
+        execute.assert_called_once()
+        self.assertEqual([c.args[1:] for c in tap.call_args_list], [(500, 1200), (60, 190)])
+
     def test_action_uses_march_confirmation_and_stops_at_insufficient_stamina(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
         clock = Clock()
@@ -262,7 +287,8 @@ class IntelligenceTest(unittest.TestCase):
 
     def test_cli_adds_intelligence_after_daily_tasks(self):
         with (patch('sys.argv', ['help_bot.py', '--device', 'test', '--daily-tasks', '--intelligence']),
-              patch.object(bot, 'emulator_device', return_value=True),
+              patch.object(bot, 'adb', return_value=b'device'),
+              patch.object(bot, 'avd_key', return_value='serial:test'),
               patch.object(bot, 'TOWN_TEMPLATE', None),
               patch.object(bot, 'return_to_city', return_value=True),
               patch.object(bot, 'run_schedule') as schedule):

@@ -17,7 +17,9 @@ def run_schedule(bot, serial, seconds, interval, forever, tasks,
     def report(name, status, reason=''):
         next_run = None
         if status == 'waiting':
-            next_run = bot.time.time() + max(0, timers.get(name, 0) - bot.time.monotonic())
+            scheduled = timers.get(name, 0)
+            if scheduled != float('inf'):
+                next_run = bot.time.time() + max(0, scheduled - bot.time.monotonic())
         bot.emit_task_event(kind='task', name=name, status=status, reason=reason, next_run=next_run)
 
     for name in tasks:
@@ -81,6 +83,15 @@ def run_schedule(bot, serial, seconds, interval, forever, tasks,
                         if name in disabled_tasks:
                             continue
                         if bot.time.monotonic() >= timers.get(name, 0):
+                            if name == 'gather' and hasattr(task, 'ready'):
+                                ready = task.ready()
+                                timers[name] = getattr(task, 'next_check_at',
+                                                       bot.time.monotonic() + getattr(task, 'poll_seconds', 60))
+                                if getattr(task, 'image', None) is not None:
+                                    image = task.image
+                                if not ready:
+                                    report(name, 'waiting', '等待采集队列倒计时到期')
+                                    continue
                             report(name, 'running')
                             if name not in bot.RECRUIT_TYPES and on_recruit_page():
                                 image = bot.retry_once(
@@ -103,7 +114,8 @@ def run_schedule(bot, serial, seconds, interval, forever, tasks,
                                     serial, text_template, reconnect_template,
                                     lambda: bot.recover_task_city(serial, help_template, nav_template,
                                                                   text_template, reconnect_template))
-                            delay = (15 if name == 'heal' else 60 if name == 'hunt' else bot.EXPLORE_INTERVAL if name == 'explore' else
+                            delay = (getattr(task, 'poll_seconds', 600) if name == 'gather' else
+                                     15 if name == 'heal' else 60 if name == 'hunt' else bot.EXPLORE_INTERVAL if name == 'explore' else
                                      60 if name in ('task_rewards', 'train', *bot.RECRUIT_TYPES, *bot.PET_SKILLS,
                                                    'warehouse', 'stamina', 'dawn') else 600)
                             timers[name] = bot.time.monotonic() + delay
@@ -134,9 +146,9 @@ def run_schedule(bot, serial, seconds, interval, forever, tasks,
                                     serial, text_template, reconnect_template)
                             else:
                                 consecutive_failures = 0
+                                if name == 'gather' and hasattr(task, 'next_check_at'):
+                                    timers[name] = task.next_check_at
                                 report(name, 'waiting')
-                                if name == 'intelligence' and 'gather' in tasks:
-                                    timers['gather'] = 0
                                 if name == 'intelligence' and 'hunt' in tasks:
                                     # Intelligence may release ordinary hunt waits,
                                     # but must not restart a stamina check early.

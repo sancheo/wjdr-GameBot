@@ -3,8 +3,10 @@
 import math
 
 TASK_LABELS = {
+    "bear": "自动打熊",
     "help_clicker": "互助连点",
     "task_rewards": "任务奖励",
+    "alliance_chests": "联盟宝箱",
     "explore": "探险经验", "train": "自动练兵", "heal": "自动治疗", "donate": "联盟捐献",
     "recruit_advanced": "高级招募", "recruit_epic": "史诗招募", "treasure": "宠物寻宝",
     "warehouse": "仓库补给", "stamina": "体力罐头", "tree": "生命结晶收集",

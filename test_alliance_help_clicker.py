@@ -28,6 +28,7 @@ class HelpClickerTest(unittest.TestCase):
         self.enterContext(patch.object(bot.time, "monotonic", self.clock.monotonic))
         self.enterContext(patch.object(bot.time, "sleep", self.clock.sleep))
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        self.inspect = self.enterContext(patch.object(bot, "inspect", return_value=(False, None, 0)))
 
     def run_mode(self):
         bot.run_help_clicker("test", *([None] * 4))
@@ -80,7 +81,7 @@ class HelpClickerTest(unittest.TestCase):
               patch.object(bot, "WILDERNESS_HEALING", healing),
               patch.object(bot, "return_to_city", return_value=True) as city,
               patch.object(clicker, "enter") as enter,
-              patch.object(bot, "screenshot", side_effect=[image, empty, empty]) as screenshot,
+              patch.object(bot, "screenshot", side_effect=[image, image, empty, empty]) as screenshot,
               patch.object(bot, "forced_offline", return_value=False),
               patch.object(bot, "network_reconnect_target", return_value=None),
               patch.object(bot, "game_foreground", return_value=True),
@@ -93,7 +94,7 @@ class HelpClickerTest(unittest.TestCase):
             self.assertIs(bot.TASK_HELP, ordinary_help)
             self.assertIs(bot.WILDERNESS_HEALING, healing)
         self.assertEqual(calls, [("test", "shell", "input", "tap", "540", "2230")] * 90)
-        self.assertEqual(screenshot.call_count, 3)
+        self.assertEqual(screenshot.call_count, 4)
         city.assert_called_once()
         enter.assert_called_once()
         ocr.assert_not_called()
@@ -104,12 +105,13 @@ class HelpClickerTest(unittest.TestCase):
         offline = False
         disconnected = False
         taps, reconnect_times = [], []
+        image = fixture("page")
 
         def capture(_):
             nonlocal offline, disconnected
             if not disconnected and self.clock.now >= 102:
                 offline = disconnected = True
-            return offline
+            return image
 
         def tap(_, *args):
             nonlocal offline
@@ -124,7 +126,7 @@ class HelpClickerTest(unittest.TestCase):
                 offline = False
 
         with (patch.object(bot, "screenshot", side_effect=capture),
-              patch.object(bot, "forced_offline", side_effect=lambda image, *_: image),
+              patch.object(bot, "forced_offline", side_effect=lambda *_: offline),
               patch.object(bot, "network_reconnect_target", return_value=None),
               patch.object(bot, "return_to_city", side_effect=lambda *_: not offline),
               patch.object(bot, "reconnect_target", return_value=(750, 1480)),
@@ -139,6 +141,20 @@ class HelpClickerTest(unittest.TestCase):
         self.assertEqual(enter.call_count, 2)
         self.assertEqual(len(taps), 50)
 
+    def test_main_map_enters_alliance_without_returning_to_city(self):
+        self.inspect.return_value = (True, None, 0)
+        image = fixture("page")
+        with (patch.object(bot, "screenshot", return_value=image),
+              patch.object(bot, "forced_offline", return_value=False),
+              patch.object(bot, "network_reconnect_target", return_value=None),
+              patch.object(bot, "return_to_city") as city,
+              patch.object(clicker, "enter", side_effect=control.StopRequested) as enter,
+              self.assertRaises(control.StopRequested)):
+            self.run_mode()
+        city.assert_not_called()
+        enter.assert_called_once_with(bot, "test", None, None)
+        self.assertTrue(self.inspect.call_args.kwargs["allow_wilderness"])
+
     def test_network_reconnect_reenters_before_resuming_clicks(self):
         taps = []
 
@@ -150,7 +166,8 @@ class HelpClickerTest(unittest.TestCase):
 
         with (patch.object(bot, "screenshot"),
               patch.object(bot, "forced_offline", return_value=False),
-              patch.object(bot, "network_reconnect_target", side_effect=[None, (780, 1480), None]),
+              patch.object(bot, "network_reconnect_target",
+                           side_effect=[None, None, (780, 1480), None, None]),
               patch.object(bot, "return_to_city", return_value=True) as city,
               patch.object(bot, "game_foreground", return_value=True),
               patch.object(clicker, "enter") as enter,
@@ -201,7 +218,7 @@ class HelpClickerDispatchTest(unittest.TestCase):
             self.assertIsNone(bot.WILDERNESS_HEALING)
 
         with (patch.object(bot.sys, "argv", args),
-              patch.object(bot, "emulator_device", return_value=True),
+              patch.object(bot, "adb", return_value=b"device"),
               patch.object(bot, "avd_key", return_value="avd:test"),
               patch.object(bot, "bind_console_emulator"),
               patch.object(bot, "DeviceLease", return_value=Mock(acquire=Mock(return_value=lease))),
@@ -223,7 +240,7 @@ class HelpClickerDispatchTest(unittest.TestCase):
 
     def test_mode_is_off_by_default(self):
         with (patch.object(bot.sys, "argv", ["help_bot.py", "--device", "test", "--dry-run"]),
-              patch.object(bot, "emulator_device", return_value=True),
+              patch.object(bot, "adb", return_value=b"device"),
               patch.object(bot, "avd_key", return_value="avd:test"),
               patch.object(bot, "bind_console_emulator"),
               patch.object(bot, "run_help_clicker") as click,

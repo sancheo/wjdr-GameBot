@@ -37,11 +37,32 @@ class RuntimeControlTest(unittest.TestCase):
             with (patch.object(bot, "ROOT", Path(directory)),
                   patch.object(bot.sys, "argv", ["help_bot.py", "--device", "test", "--reconnect-minutes", "0.5"]),
                   patch.object(bot.Image, "open", return_value=bot.Image.new("RGB", (32, 48))),
-                  patch.object(bot, "emulator_device", side_effect=KeyboardInterrupt),
+                  patch.object(bot, "adb", side_effect=KeyboardInterrupt),
                   contextlib.redirect_stdout(io.StringIO())):
                 bot.main()
         self.assertIs(bot.TOWN_TEMPLATE, original[0])
         self.assertEqual(bot.RECONNECT_DELAY, original[1])
+
+    def test_cli_discovers_authorized_phone_and_requires_selection_for_multiple_devices(self):
+        for output, expected in [("List of devices attached\nPHONE123\tdevice\nPHONE456\tunauthorized\n", "PHONE123"),
+                                 ("List of devices attached\nPHONE123\tdevice\nemulator-5554\tdevice\n", None)]:
+            with self.subTest(output=output), patch.object(bot.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output)):
+                if expected:
+                    self.assertEqual(bot.connected_device(), expected)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "--device"):
+                        bot.connected_device()
+
+    def test_main_accepts_phone_and_reaches_task_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (patch.object(bot, "ROOT", Path(directory)),
+                  patch.object(bot.sys, "argv", ["help_bot.py", "--device", "PHONE123", "--dry-run"]),
+                  patch.object(bot.Image, "open", return_value=bot.Image.new("RGB", (32, 48))),
+                  patch.object(bot, "adb", return_value=b"device\n"),
+                  patch.object(bot, "run", side_effect=KeyboardInterrupt) as run,
+                  contextlib.redirect_stdout(io.StringIO())):
+                bot.main()
+        self.assertEqual(run.call_args.args[0], "PHONE123")
 
     def test_stop_blocks_next_adb_action_and_bypasses_retry_diagnostics(self):
         state = control.RuntimeControl()

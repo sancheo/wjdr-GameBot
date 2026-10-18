@@ -27,6 +27,21 @@ class TaskRewardsTest(unittest.TestCase):
         target = rewards.green_claim(bot, growth, ("领取",), (740, 580, 1020, 1890))
         self.assertTrue(1100 < target[1] < 1200)  # Never click the blue 前往 button above it.
 
+    def test_startup_closes_existing_task_panel_before_checking_city(self):
+        clock = Clock()
+        popup = self.frame("daily-one").convert("L")
+        city = bot.open_template(bot.ROOT / "artifacts/stamina-ready.png").convert("L")
+        help_icon = bot.open_template(bot.ROOT / "assets/emulator-help-icon.png").convert("L")
+        nav = bot.open_template(bot.ROOT / "assets/emulator-city-nav.png").convert("L")
+        with (patch.object(bot.time, "monotonic", clock.monotonic),
+              patch.object(bot.time, "sleep", clock.sleep),
+              patch.object(bot, "screenshot", side_effect=[popup, city, city, city]),
+              patch.object(bot, "task_tap") as tap,
+              patch.object(bot, "forced_offline", return_value=False),
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertTrue(bot.return_to_city("test", help_icon, nav, None, None))
+        tap.assert_called_once_with("test", 1030, 460)
+
     def test_entry_requires_surface_icon_red_badge_and_positive_number(self):
         frame = self.frame("entry")
         with patch.object(bot, "inspect", return_value=(True, None, 0)):

@@ -9,11 +9,11 @@ from platform_support import configure_stdio
 
 ROOT = Path(__file__).resolve().parent
 FAST_MODULES = {
-    "test_gui_web", "test_emulator_config", "test_emulator_runtime", "test_platform_support",
+    "test_gui_web", "test_emulator_config", "test_emulator_runtime", "test_device_notes", "test_platform_support",
     "test_device_lease", "test_runtime_control", "test_task_status", "test_stamina_identity",
     "test_image_matching", "test_hunting",
     "test_runtime_logs", "test_maintenance",
-    "test_alliance_help_clicker", "test_app_updates",
+    "test_alliance_help_clicker", "test_bear_runtime", "test_app_updates",
 }
 
 

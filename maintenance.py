@@ -7,15 +7,62 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+import socket
 
 from device_lease import DeviceLease
 from emulator_config import load_config, write_json
-from emulator_runtime import discover_emulators, stop_emulator
+from emulator_runtime import discover_emulators, adb_output, avd_key
 from platform_support import SUBPROCESS_OPTIONS, configure_stdio
 from runtime_logs import cleanup_logs, emulator_directory, LOG_NAME, safe_directory
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "configs" / "maintenance.json"
+
+
+
+# Legacy AVD shutdown is private to maintenance; the desktop manages connections only.
+def emulator_console_open(port):
+    """Check Windows listeners without a TCP probe that can time out after shutdown."""
+    if sys.platform == "win32":
+        executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "netstat.exe"
+        try:
+            output = subprocess.run([str(executable), "-ano", "-p", "tcp"], check=True,
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                    timeout=4, **SUBPROCESS_OPTIONS).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"无法确认模拟器控制台端口是否关闭：{exc}") from exc
+        for line in output.splitlines():
+            parts = line.split()
+            if (len(parts) >= 4 and parts[0] == "TCP" and parts[3] == "LISTENING"
+                    and parts[1].rsplit(":", 1)[-1] == str(port)):
+                return True
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except (ConnectionRefusedError, ConnectionResetError):
+        return False
+    except TimeoutError:
+        # An unanswered probe does not prove that the emulator has exited.
+        return True
+
+
+def stop_emulator(serial, avd, timeout=30):
+    """Close only the requested AVD, then wait for its transport and console to exit."""
+    if not serial.startswith("emulator-") or not serial[9:].isdigit() or avd_key(serial) != f"avd:{avd}":
+        raise ValueError("模拟器连接标识已变化，请刷新模拟器列表后再重启")
+    reply = adb_output("-s", serial, "emu", "kill")
+    if any(line.startswith("KO:") for line in reply.splitlines()):
+        raise RuntimeError(f"关闭模拟器失败：{reply}")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        output = adb_output("devices")
+        connected = any(line.split() and line.split()[0] == serial for line in output.splitlines()[1:])
+        if not connected and not emulator_console_open(int(serial[9:])):
+            return
+        time.sleep(0.5)
+    raise RuntimeError("等待模拟器关闭超时，未重新启动，请检查模拟器窗口后刷新")
 
 
 def saved_keys(root=ROOT):
@@ -25,7 +72,7 @@ def saved_keys(root=ROOT):
             continue
         data = json.loads(path.read_text(encoding="utf-8"))
         key = data.get("emulator") if isinstance(data, dict) else None
-        if not isinstance(key, str) or not key.startswith("avd:"):
+        if not isinstance(key, str) or not key.startswith(("avd:", "serial:")):
             continue
         if not load_config(root, key):
             raise ValueError(f"Missing saved configuration: {key}")
@@ -115,26 +162,42 @@ def prepare():
     if error:
         raise RuntimeError(error)
     connected = [row for row in devices if row["serial"]]
-    if any(not row["avd"] for row in connected):
+    if any(not row["avd"] and row.get("kind") != "physical" for row in connected):
         raise RuntimeError("Cannot restart a non-AVD emulator automatically; configure its launcher first")
+    keys = saved_keys()
+    active_keys = {row["emulator"] for row in desktop_states()
+                   if row.get("emulator") and
+                   (row["emulator"].startswith("avd:") or row.get("running"))}
     if state["phase"] != "stopping":
-        keys = saved_keys()
-        active_keys = {row["emulator"] for row in desktop_states() if row.get("emulator")}
-        running_keys = {row["key"] for row in connected}
-        targets = sorted((active_keys | running_keys) & set(keys)) or keys
+        # Only running phone sessions resume tasks. An idle phone window must
+        # not log in automatically and evict the same account on an AVD.
+        running_keys = {row["key"] for row in connected if row["avd"]}
+        targets = sorted((active_keys | running_keys) & set(keys)) or [key for key in keys if key.startswith("avd:")]
         if not targets:
-            raise RuntimeError("No saved AVD task configuration to restore")
+            raise RuntimeError("No saved device task configuration to restore")
         state = {"version": 1, "phase": "stopping", "started": datetime.now().isoformat(),
                  "targets": targets, "devices": connected}
+        write_json(STATE, state)
+    else:
+        # A phone session may have started since an interrupted maintenance.
+        # Preserve it before the project-wide desktop shutdown, too.
+        state["targets"] = sorted(set(state["targets"]) | (active_keys & set(keys)))
         write_json(STATE, state)
     subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                     str(ROOT / "scripts" / "stop_desktop.ps1"), "-ProjectRoot", str(ROOT)],
                    check=True, timeout=180, **SUBPROCESS_OPTIONS)
-    for row in connected:
+    # Closing a desktop can also terminate its child emulator. Refresh before
+    # stopping AVDs so a vanished/reassigned serial cannot interrupt prepare.
+    shutdown_devices, error = discover_emulators()
+    if error:
+        raise RuntimeError(error)
+    for row in shutdown_devices:
+        if not row["avd"] or not row["serial"]:
+            continue
         with DeviceLease(row["serial"], row["key"]):
             stop_emulator(row["serial"], row["avd"])
     remaining, error = discover_emulators()
-    if error or any(row["serial"] for row in remaining):
+    if error or any(row["serial"] and row.get("kind") != "physical" for row in remaining):
         raise RuntimeError(error or "Some emulators are still connected")
     if any(row.get("ExecutablePath") and Path(row["ExecutablePath"]).parent == ROOT
            and row["Name"].startswith("GameBot") for row in process_inventory()):

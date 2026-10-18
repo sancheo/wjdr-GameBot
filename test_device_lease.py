@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from device_lease import DeviceLease
@@ -37,8 +38,17 @@ class DeviceLeaseTest(unittest.TestCase):
                     DeviceLease("parent", "avd:A", directory).acquire()
                 terminate_task_process(child)
                 child.wait(timeout=5)
-                with DeviceLease("parent", "avd:A", directory):
-                    pass
+                # A Windows venv launcher can exit just before its terminated
+                # interpreter child releases the inherited OS file handle.
+                deadline = time.monotonic() + 2
+                while True:
+                    try:
+                        with DeviceLease("parent", "avd:A", directory):
+                            break
+                    except RuntimeError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(.02)
             finally:
                 if child.poll() is None:
                     child.kill()

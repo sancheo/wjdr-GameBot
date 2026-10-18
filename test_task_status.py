@@ -10,6 +10,11 @@ from task_status import validate_task_event
 
 
 class TaskStatusTest(unittest.TestCase):
+    def test_bear_events_are_visible_in_desktop_status(self):
+        for status in ("running", "waiting", "retrying", "stopped", "failed"):
+            event = validate_task_event({"kind": "task", "name": "bear", "status": status})
+            self.assertEqual(event["label"], "自动打熊")
+
     def test_help_clicker_events_have_a_visible_chinese_label(self):
         for status in ("running", "retrying", "stopped"):
             event = validate_task_event({"kind": "task", "name": "help_clicker", "status": status})

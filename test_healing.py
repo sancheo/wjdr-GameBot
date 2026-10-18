@@ -1,4 +1,4 @@
-"""Real emulator-5556 hospital samples and scheduler continuation regressions."""
+"""Real big-account Nox hospital samples and scheduler continuation regressions."""
 import contextlib
 import io
 import tempfile
@@ -16,6 +16,52 @@ from test_help_bot import Clock
 
 
 class HealingTest(unittest.TestCase):
+    def pixel5_frame(self, name):
+        with Image.open(bot.ROOT / f'tests/fixtures/heal-5554-{name}.png') as image:
+            return image.convert('RGB')
+
+    def test_pixel5_labels_and_disabled_zero_unit_treatment(self):
+        dialog, selected = (self.pixel5_frame(name) for name in ('dialog', 'selected'))
+        for image in (dialog, selected):
+            offset = healing.page(bot, image)
+            self.assertEqual(offset, (1, -1))
+            self.assertTrue(healing.button(bot, image, 'quick', offset))
+            self.assertTrue(healing.button(bot, image, 'treat', offset))
+        self.assertFalse(healing.treatment_ready(bot, dialog, offset))
+        self.assertTrue(healing.treatment_ready(bot, selected, offset))
+
+    def test_pixel5_waits_for_selection_before_starting_treatment(self):
+        dialog, selected = (self.pixel5_frame(name) for name in ('dialog', 'selected'))
+        started = self.pixel5_frame('started')
+        self.assertTrue(healing.button(bot, started, 'help', healing.page(bot, started)))
+        self.assertTrue(healing.in_progress(bot, started, healing.page(bot, started)))
+        sequence = [dialog, dialog, selected, started,
+                    self.frames['help-requested'], self.frames['returned']]
+        with (patch.object(bot, 'task_screen', side_effect=sequence),
+              patch.object(bot, 'task_tap') as tap,
+              contextlib.redirect_stdout(io.StringIO())):
+            result = bot.run_healing('emulator-5554', self.help, self.nav, dialog)
+        self.assertIs(result, self.frames['returned'])
+        self.assertEqual([call.args[1:] for call in tap.call_args_list],
+                         [(201, 1694), (776, 1694), (776, 1694), (899, 662)])
+
+    def test_pixel5_missed_quick_selection_never_treats_or_closes(self):
+        dialog = self.pixel5_frame('dialog')
+        with (patch.object(bot, 'task_screen', return_value=dialog),
+              patch.object(bot, 'task_tap') as tap):
+            with self.assertRaisesRegex(RuntimeError, '未确认已选中伤兵'):
+                bot.run_healing('emulator-5554', self.help, self.nav, dialog)
+        tap.assert_called_once_with('emulator-5554', 201, 1694)
+
+    def test_unrecognized_hospital_state_never_silently_closes(self):
+        with (patch.object(healing, 'button', return_value=False),
+              patch.object(healing, 'in_progress', return_value=False),
+              patch.object(bot, 'task_screen', return_value=self.frames['dialog']),
+              patch.object(bot, 'task_tap') as tap):
+            with self.assertRaisesRegex(RuntimeError, '未确认快速选择'):
+                bot.run_healing('test', self.help, self.nav, self.frames['dialog'])
+        tap.assert_not_called()
+
     def test_task_frame_heals_before_continuing_without_requiring_alliance_help(self):
         sequence = ['wilderness', 'dialog', 'selected', 'started', 'help-requested', 'returned']
         with (patch.object(bot, 'WILDERNESS_HEALING', (self.help, self.nav)),
@@ -29,7 +75,7 @@ class HealingTest(unittest.TestCase):
         self.assertIs(result, self.frames['returned'])
         self.assertFalse(bot.HEALING_ACTIVE)
         self.assertEqual([call.args[1:] for call in tap.call_args_list],
-                         [(837, 1994), (200, 1695), (775, 1695), (775, 1695), (899, 804)])
+                         [(837, 1994), (200, 1553), (775, 1553), (775, 1553), (899, 662)])
 
     def test_disabled_automatic_healing_does_not_interrupt_field_task(self):
         with patch.object(bot, 'WILDERNESS_HEALING', None), patch.object(bot, 'run_healing') as heal:
@@ -38,8 +84,11 @@ class HealingTest(unittest.TestCase):
 
     def setUp(self):
         self.frames = {}
-        for name in ('before', 'wilderness', 'dialog', 'selected', 'started', 'help-requested', 'returned'):
-            with Image.open(bot.ROOT / f'tests/fixtures/heal-5556-{name}.png') as image:
+        samples = {'before': 'city-ready', 'wilderness': 'field', 'dialog': 'dialog-sampled',
+                   'selected': 'selected', 'started': 'progress-sampled',
+                   'help-requested': 'help-requested', 'returned': 'returned'}
+        for name, sample in samples.items():
+            with Image.open(bot.ROOT / f'tests/fixtures/nox/heal-big-20261018-{sample}.png') as image:
                 self.frames[name] = image.convert('RGB')
         self.help = bot.open_template(bot.ROOT / 'assets/emulator-help-icon.png').convert('L')
         self.nav = bot.open_template(bot.ROOT / 'assets/emulator-city-nav.png').convert('L')
@@ -61,20 +110,20 @@ class HealingTest(unittest.TestCase):
             result = bot.run_healing('test', self.help, self.nav, self.frames['wilderness'])
         self.assertIs(result, self.frames['returned'])
         self.assertEqual([call.args[1:] for call in tap.call_args_list],
-                         [(837, 1994), (200, 1695), (775, 1695), (775, 1695), (899, 804)])
+                         [(837, 1994), (200, 1553), (775, 1553), (775, 1553), (899, 662)])
 
     def test_existing_treatment_requests_help_without_restarting_or_cancelling(self):
         with (patch.object(bot, 'task_screen', side_effect=[self.frames['help-requested'], self.frames['returned']]),
               patch.object(bot, 'task_tap') as tap,
               contextlib.redirect_stdout(io.StringIO())):
             bot.run_healing('test', self.help, self.nav, self.frames['started'])
-        self.assertEqual([call.args[1:] for call in tap.call_args_list], [(775, 1695), (899, 804)])
+        self.assertEqual([call.args[1:] for call in tap.call_args_list], [(775, 1553), (899, 662)])
 
     def test_already_requested_help_only_closes_popup(self):
         with (patch.object(bot, 'task_screen', return_value=self.frames['returned']),
               patch.object(bot, 'task_tap') as tap):
             bot.run_healing('test', self.help, self.nav, self.frames['help-requested'])
-        tap.assert_called_once_with('test', 899, 804)
+        tap.assert_called_once_with('test', 899, 662)
 
     def test_no_wounds_does_not_tap(self):
         with patch.object(bot, 'task_tap') as tap:
@@ -87,14 +136,14 @@ class HealingTest(unittest.TestCase):
               patch.object(bot, 'task_tap') as tap):
             with self.assertRaisesRegex(RuntimeError, '未确认联盟互助'):
                 bot.run_healing('test', self.help, self.nav, self.frames['dialog'])
-        self.assertEqual([call.args[1:] for call in tap.call_args_list], [(200, 1695), (775, 1695)])
+        self.assertEqual([call.args[1:] for call in tap.call_args_list], [(200, 1553), (775, 1553)])
 
     def test_stop_during_selection_never_starts_treatment(self):
         with (patch.object(bot, 'task_screen', side_effect=StopRequested()),
               patch.object(bot, 'task_tap') as tap):
             with self.assertRaises(StopRequested):
                 bot.run_healing('test', self.help, self.nav, self.frames['dialog'])
-        tap.assert_called_once_with('test', 200, 1695)
+        tap.assert_called_once_with('test', 200, 1553)
 
     def test_resource_shortage_is_closed_and_returns_to_map_without_requesting_help(self):
         shortage = Image.new('RGB', bot.EXPECTED_SIZE)
@@ -106,20 +155,20 @@ class HealingTest(unittest.TestCase):
             result = bot.run_healing('test', self.help, self.nav, self.frames['dialog'])
         self.assertIs(result, self.frames['returned'])
         self.assertEqual([call.args[1:] for call in tap.call_args_list],
-                         [(200, 1695), (775, 1695), (995, 550), (899, 804)])
+                         [(200, 1553), (775, 1553), (995, 550), (899, 662)])
 
     def test_unchanged_help_button_does_not_claim_success(self):
         with (patch.object(bot, 'task_screen', return_value=self.frames['started']),
               patch.object(bot, 'task_tap') as tap):
             with self.assertRaisesRegex(RuntimeError, '互助请求尚未确认'):
                 bot.run_healing('test', self.help, self.nav, self.frames['started'])
-        tap.assert_called_once_with('test', 775, 1695)
+        tap.assert_called_once_with('test', 775, 1553)
 
     def test_shifted_hospital_popup_keeps_actions_on_buttons(self):
         shifted = self.frames['dialog'].copy()
-        shifted.paste(self.frames['dialog'].crop((80, 750, 960, 1810)), (90, 650))
+        shifted.paste(self.frames['dialog'].crop((80, 608, 960, 1668)), (90, 548))
         offset = healing.page(bot, shifted)
-        self.assertEqual(offset, (10, -100))
+        self.assertEqual(offset, (10, -202))
         self.assertTrue(healing.button(bot, shifted, 'quick', offset))
         self.assertTrue(healing.button(bot, shifted, 'treat', offset))
 

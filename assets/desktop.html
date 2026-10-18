@@ -13,27 +13,21 @@
   <main class="shell">
     <header class="branding">
       <img src="gamebot-icon.png" alt="" class="logo">
-      <div><h1>无尽冬日 GameBot</h1><p>自动任务控制台 · <span id="app-version">正在读取版本…</span></p></div>
-      <button id="check-updates" class="refresh update-check" disabled>检查更新</button>
+      <div><h1>无尽冬日 GameBot</h1><p>自动任务控制台 · <button id="check-updates" class="version-check" aria-label="检查更新" title="点击检查更新" disabled><span id="app-version">正在读取版本…</span></button></p></div>
+      <button id="new-version" class="update-badge" aria-haspopup="dialog" aria-controls="update-dialog" hidden>新版本</button>
     </header>
-    <section id="update-panel" class="panel update-panel" aria-label="软件更新">
-      <p id="update-message" role="status">正在读取更新状态…</p>
-      <progress id="update-progress" max="100" value="0" hidden aria-label="更新下载进度"></progress>
-      <details id="update-details" hidden><summary>更新说明</summary><p id="update-notes"></p></details>
-      <button id="update-action" class="refresh" hidden>下载更新</button>
-    </section>
-    <section class="panel device-panel" aria-label="模拟器与运行控制">
+    <section class="panel device-panel" aria-label="安卓设备与运行控制">
       <img src="ui/monitor.png" alt="" class="device-icon">
       <div class="device-group">
-        <label class="field-title" for="device">模拟器</label>
+        <label class="field-title" for="device">安卓设备</label>
         <div class="device-row">
           <div class="device-picker">
-            <button id="device" class="device-trigger" disabled aria-label="选择模拟器" aria-haspopup="dialog" aria-expanded="false" aria-controls="device-list"><span id="device-label">请选择模拟器</span><span aria-hidden="true">▾</span></button>
-            <div id="device-list" class="device-list" role="dialog" aria-label="模拟器列表" hidden></div>
+            <button id="device" class="device-trigger" disabled aria-label="选择安卓设备" aria-haspopup="dialog" aria-expanded="false" aria-controls="device-list"><span id="device-label">请选择设备</span><span aria-hidden="true">▾</span></button>
+            <div id="device-list" class="device-list" role="dialog" aria-label="安卓设备列表" hidden></div>
           </div>
           <button id="refresh" class="refresh" disabled><img src="ui/refresh.png" alt="">刷新</button>
         </div>
-        <p id="device-status" class="device-status" role="status">正在查找模拟器…</p>
+        <p id="device-status" class="device-status" role="status">正在查找安卓设备…</p>
       </div>
       <div class="device-divider"></div>
       <div class="action-group">
@@ -66,6 +60,16 @@
       </div>
     </section>
   </main>
+  <dialog id="update-dialog" aria-labelledby="update-title">
+    <h2 id="update-title">发现新版本</h2>
+    <p class="update-versions"><span id="update-current"></span><span aria-hidden="true">→</span><strong id="update-version"></strong></p>
+    <h3 class="update-notes-title">更新内容</h3>
+    <p id="update-notes" class="update-notes" tabindex="0" aria-label="更新内容"></p>
+    <p id="update-message" class="update-message" role="status" hidden></p>
+    <progress id="update-progress" max="100" value="0" hidden aria-label="更新下载进度"></progress>
+    <div class="dialog-actions update-actions"><button id="update-cancel" type="button" class="secondary" autofocus>取消</button><button id="update-action" type="button">更新</button></div>
+  </dialog>
+  <dialog id="device-note-dialog" aria-labelledby="device-note-title"><h2 id="device-note-title">设备备注</h2><p id="device-note-name"></p><form id="device-note-form"><label for="device-note-input">备注（最多 80 字，留空可清除）</label><input id="device-note-input" type="text" maxlength="80" autocomplete="off"><div class="dialog-actions"><button id="device-note-cancel" type="button" class="secondary">取消</button><button id="device-note-save" type="submit">保存</button></div></form></dialog>
   <dialog id="notice"><h2 id="notice-title">提示</h2><p id="notice-message"></p><form method="dialog"><button autofocus>确定</button></form></dialog>
   <dialog id="help-clicker-confirm" aria-labelledby="help-clicker-confirm-title" aria-describedby="help-clicker-confirm-message"><h2 id="help-clicker-confirm-title">互助连点</h2><p id="help-clicker-confirm-message">打开时其他功能不会执行, 只会进入联盟互助界面快速点击互助</p><form method="dialog"><button class="secondary" value="no" autofocus>否</button><button value="yes">是</button></form></dialog>
 </body>

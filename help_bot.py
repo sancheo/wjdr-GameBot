@@ -12,8 +12,12 @@ import sys
 import math
 import threading
 import task_scheduler
+from gather_return import GatherTask
 import task_rewards
+import alliance_chests
+import island_help
 import alliance_help_clicker
+import bear_hunting
 import healing
 import hunting
 from runtime_control import (clock as time, RuntimeControl, StopRequested, activate,
@@ -21,6 +25,7 @@ from runtime_control import (clock as time, RuntimeControl, StopRequested, activ
 from device_lease import DeviceLease
 from emulator_runtime import avd_key
 from image_matching import open_template, minimum_difference, find_mask as matched_mask
+from screen_geometry import adapter as screen_adapter, scene_view
 from task_status import task_label as task_display_name
 from pathlib import Path
 
@@ -42,6 +47,7 @@ EMULATOR_RECONNECT_BOX = (570, 1435, 935, 1530)
 OFFLINE_TEXT_BOX = EMULATOR_OFFLINE_TEXT_BOX
 RECONNECT_BOX = EMULATOR_RECONNECT_BOX
 HELP_COUNT_BOX = (830, 2050, 865, 2085)
+# Logical canvas used by templates, OCR, navigation, taps and swipes.
 EXPECTED_SIZE = (1080, 2340)
 HELP_LIMIT = 22
 NAV_LIMIT = 20
@@ -138,6 +144,10 @@ def wait_help_update(serial, before, after, help_template, nav_template, capture
 
 def adb(serial, *args, timeout=15):
     check_stop()
+    if args[:3] in (("shell", "input", "tap"), ("shell", "input", "swipe")):
+        if screen_adapter.geometry(serial) is None:
+            color_screenshot(serial)
+        args = screen_adapter.input(serial, args)
     result = subprocess.run(
         [str(ADB), "-s", serial, *args],
         check=True,
@@ -155,24 +165,25 @@ def connected_device():
         encoding="utf-8", errors="replace", timeout=15, **SUBPROCESS_OPTIONS
     ).stdout
     devices = [line.split()[0] for line in result.splitlines()[1:]
-               if line.endswith("\tdevice") and emulator_device(line.split()[0])]
+               if len(line.split()) >= 2 and line.split()[1] == "device"]
     if len(devices) != 1:
-        raise RuntimeError(f"需要恰好一台已连接模拟器，当前找到 {len(devices)} 台；可用 --device 指定")
+        raise RuntimeError(f"需要恰好一台已连接安卓设备，当前找到 {len(devices)} 台；可用 --device 指定")
     return devices[0]
 
 
-def emulator_device(serial):
-    return serial.startswith("emulator-") or any(
-        adb(serial, "shell", "getprop", prop).strip() == b"1"
-        for prop in ("ro.kernel.qemu", "ro.boot.qemu"))
-
-
 def screenshot(serial):
-    return Image.open(io.BytesIO(adb(serial, "exec-out", "screencap", "-p"))).convert("L")
+    return color_screenshot(serial).convert("L")
 
 
 def color_screenshot(serial):
-    return Image.open(io.BytesIO(adb(serial, "exec-out", "screencap", "-p"))).convert("RGB")
+    native = Image.open(io.BytesIO(adb(serial, "exec-out", "screencap", "-p"))).convert("RGB")
+    previous = screen_adapter.geometry(serial)
+    image = screen_adapter.frame(serial, native)
+    geometry = screen_adapter.geometry(serial)
+    if previous is None or (previous.size, previous.viewport) != (geometry.size, geometry.viewport):
+        print(f"屏幕适配：{native.width}×{native.height} → 1080×2340；"
+              f"游戏区域 {geometry.viewport}；截图与操作坐标已统一", file=sys.stderr, flush=True)
+    return image
 
 
 def difference(left, right):
@@ -184,8 +195,6 @@ def forced_offline(image, text_template, reconnect_template):
 
 
 def reconnect_target(image, text_template, reconnect_template):
-    if image.size != EXPECTED_SIZE:
-        raise RuntimeError(f"屏幕尺寸 {image.size} 与已校准尺寸 {EXPECTED_SIZE} 不同")
     if (difference(image.crop(OFFLINE_TEXT_BOX), text_template) <= OFFLINE_LIMIT
             and difference(image.crop(RECONNECT_BOX), reconnect_template) <= OFFLINE_LIMIT):
         return ((RECONNECT_BOX[0] + RECONNECT_BOX[2]) // 2,
@@ -195,8 +204,6 @@ def reconnect_target(image, text_template, reconnect_template):
 
 def city_relocation_target(image):
     """Only acknowledge the observed zero-defense automatic relocation notice."""
-    if image.size != EXPECTED_SIZE:
-        return None
     gray = image.convert("L")
     for name, box in (("relocation-title", (490, 925, 590, 980)),
                       ("relocation-message", (130, 1130, 940, 1240)),
@@ -209,8 +216,6 @@ def city_relocation_target(image):
 
 def network_reconnect_target(image):
     """Require the network title, explanation and reconnect button together."""
-    if image.size != EXPECTED_SIZE:
-        return None
     gray = image.convert("L")
     for name, box in (("network-title", (465, 925, 615, 980)),
                       ("network-message", (90, 1180, 960, 1230)),
@@ -222,6 +227,15 @@ def network_reconnect_target(image):
 
 
 def reconnect_popup_target(image):
+    target = secret_choice_close_target(image)
+    if target is not None:
+        return target
+    target = bazaar_close_target(image)
+    if target is not None:
+        return target
+    target = dawn_gift_close_target(image)
+    if target is not None:
+        return target
     target = legendary_gift_close_target(image)
     if target is not None:
         return target
@@ -253,10 +267,40 @@ def reconnect_popup_target(image):
     return None
 
 
+def secret_choice_close_target(image):
+    """Require both the observed Nox offer title and its gold exit control."""
+    gray = image.convert("L")
+    for name, box in (("secret-choice-title", (345, 230, 840, 320)),
+                      ("secret-choice-close", (965, 230, 1045, 315))):
+        with open_template(ROOT / f"assets/emulator-{name}.png") as template:
+            if difference(gray.crop(box), template.convert("L")) > 15:
+                return None
+    return 1005, 272
+
+
+def bazaar_close_target(image):
+    """Close the observed bazaar only when its heading and top-right X match."""
+    import cv2
+    import numpy as np
+    gray = image.convert("L")
+    for name, box in (("bazaar-title", (350, 300, 720, 380)),
+                      ("bazaar-close", (985, 165, 1050, 235))):
+        with open_template(ROOT / f"assets/emulator-{name}.png") as template:
+            target = template.convert("L")
+            crop = gray.crop(box)
+            delta = difference(crop, target)
+            # The heading's backing varies with the emulator renderer; still
+            # require its lettering and the independent, strict close control.
+            heading_match = (name == "bazaar-title" and delta <= 24 and
+                             cv2.matchTemplate(np.asarray(crop), np.asarray(target),
+                                               cv2.TM_CCOEFF_NORMED)[0, 0] >= .88)
+            if delta > 12 and not heading_match:
+                return None
+    return 1018, 200
+
+
 def wish_shop_close_target(image):
     """Require the observed wish-shop heading and its specific close X."""
-    if image.size != EXPECTED_SIZE:
-        return None
     gray = image.convert("L")
     for name, box in (("wish-shop-title", (125, 500, 350, 565)),
                       ("wish-shop-close", (879, 505, 949, 575))):
@@ -264,6 +308,23 @@ def wish_shop_close_target(image):
             if difference(gray.crop(box), template.convert("L")) > 12:
                 return None
     return 914, 540
+
+
+def dawn_gift_close_target(image):
+    """Require the observed dawn-gift heading and its purple-backed close X."""
+    gray = image.convert("L")
+    with open_template(ROOT / "assets/emulator-dawn-gift-close.png") as template:
+        if difference(gray.crop((879, 437, 949, 507)), template.convert("L")) > 12:
+            return None
+    # The level prefix changes the heading's width; only match the gift name
+    # with the observed small horizontal shift between level 19 and level 30.
+    with open_template(ROOT / "assets/emulator-dawn-gift-title.png") as template:
+        score, _, _ = minimum_difference(gray, template.convert("L"),
+                                         (235, 430, 530, 505), range(-12, 13), (0,))
+        if score > 10 and not any("不灭曙光礼包" in text.replace(" ", "") for text, _ in
+                                  recognize_text(image.crop((110, 410, 650, 520)))):
+            return None
+    return 914, 472
 
 
 def legendary_gift_close_target(image):
@@ -280,10 +341,11 @@ def legendary_gift_close_target(image):
 
 
 def inspect(image, help_template, nav_template, allow_wilderness=False):
-    if image.size != EXPECTED_SIZE:
-        raise RuntimeError(f"屏幕尺寸 {image.size} 与已校准尺寸 {EXPECTED_SIZE} 不同")
+    check_game_guide(image)
     nav_difference = difference(image.crop(NAV_BOX), nav_template)
-    if nav_difference > NAV_LIMIT or (town_button(image) and not allow_wilderness):
+    if (nav_difference > NAV_LIMIT or (town_button(image) and not allow_wilderness)
+            or island_page(image, open_template(ROOT / "assets/emulator-island-title.png").convert("L"),
+                           use_ocr=False)):
         return False, None, nav_difference
 
     best = minimum_difference(image, help_template, HELP_BOX, range(-30, 31, 2), range(-30, 31, 2))
@@ -334,21 +396,31 @@ def task_page(image, templates, name, limit=12):
         # Match the white title text rather than raising the whole-image tolerance.
         box = TASK_BOXES[name]
         return find_white(image, templates[name], [box[0]], [box[1]])[0] >= .90
+    if name in ("alliance-title", "tech-title"):
+        # The observed header is displaced by one pixel after rendering.
+        # Keep the same difference limit and search only its immediate area.
+        score = minimum_difference(image.convert("L"), templates[name].convert("L"),
+                                   TASK_BOXES[name], range(-2, 3), range(-2, 3))[0]
+        return score <= limit or (name == "tech-title" and score <= 20
+                                  and header_text(image, "联盟科技"))
     return difference(image.crop(TASK_BOXES[name]), templates[name]) <= limit
 
 
 def task_screen(serial, help_enabled=True):
     time.sleep(1)
     image = color_screenshot(serial)
-    # Chat and profile notifications may appear a frame after the last tap.
+    check_game_guide(image)
+    # Notifications and timed offers may appear a frame after the last tap.
     # Dismiss only identified interruptions before handing a frame to a task.
     for _ in range(5):
-        target = social_back_target(image)
+        target = (social_back_target(image) or secret_choice_close_target(image)
+                  or bazaar_close_target(image))
         if target is None:
             break
         task_tap(serial, *target)
         time.sleep(1)
         image = color_screenshot(serial)
+        check_game_guide(image)
     image = check_wilderness_healing(serial, image)
     if TASK_HELP is None or not help_enabled:
         return image
@@ -425,7 +497,10 @@ def chat_page(image):
     if template is None:
         with open_template(ROOT / "assets/emulator-chat-title.png") as asset:
             template = asset.convert("L")
-    return difference(image.crop(CHAT_BOX).convert("L"), template) < 15
+    # The observed chat header renders one pixel lower on some frames.
+    # Keep the existing threshold and search only the immediate title area.
+    return minimum_difference(image.convert("L"), template, CHAT_BOX,
+                              range(-2, 3), range(-2, 3))[0] < 15
 
 
 def social_back_target(image):
@@ -447,6 +522,8 @@ def social_back_target(image):
 
 
 def alliance_back_target(image):
+    if (target := alliance_chests.back_target(sys.modules[__name__], image)) is not None:
+        return target
     gray = image.convert("L")
     # First visits to the stronghold screen open a rules modal. Its dimmed
     # underlying title cannot identify the screen until the modal is closed.
@@ -509,7 +586,8 @@ def check_wilderness_healing(serial, image):
     if gather_search_page(image) or intelligence_page(image):
         return image
     if hunting.button_target(sys.modules[__name__], image,
-                             ("攻击", "集结", "发起集结", "采集", "出征", "前往查看"),
+                             ("攻击", "集结", "发起集结", "采集", "出征", "前往查看",
+                              "营救", "探险", "战斗"),
                              (280, 500, 1050, 2300)) is not None:
         return image
     print("返回野外主界面，检测到伤兵，立即执行自动治疗", flush=True)
@@ -518,6 +596,12 @@ def check_wilderness_healing(serial, image):
 
 def run_hunt(serial, help_template, nav_template, monsters=tuple(hunting.MONSTERS), levels=None, timers=None):
     return hunting.run(sys.modules[__name__], serial, help_template, nav_template, monsters, levels, timers)
+
+
+def check_game_guide(image):
+    from gui_web import StartupGuideBlocked, startup_guide_blocked
+    if startup_guide_blocked(image):
+        raise StartupGuideBlocked("检测到强制游戏引导，普通任务导航不可用；完成引导后再恢复")
 
 
 def return_to_city(serial, help_template, nav_template, text_template, reconnect_template,
@@ -537,9 +621,16 @@ def return_to_city(serial, help_template, nav_template, text_template, reconnect
     relocation_next_try = 0
     frozen_navigation = None
     town_attempts = 0
+    frozen_tech = None
+    frozen_tech_unchanged = True
+    tech_back_attempts = 0
+    tech_first_back = None
     island_template = open_template(ROOT / "assets/emulator-island-title.png").convert("L")
     while time.monotonic() < deadline:
         image = screenshot(serial)
+        check_game_guide(image)
+        if frozen_tech is not None and difference(image, frozen_tech) >= .1:
+            frozen_tech_unchanged = False
         if forced_offline(image, text_template, reconnect_template):
             return False
         relocation_target = city_relocation_target(image)
@@ -562,6 +653,13 @@ def return_to_city(serial, help_template, nav_template, text_template, reconnect
                 print(f"检测到无网络弹窗，已点击重新连接（{network_attempts}/3），等待主城确认", flush=True)
             time.sleep(min(2, max(0, deadline - time.monotonic())))
             continue
+        bazaar_target = secret_choice_close_target(image) or bazaar_close_target(image)
+        if bazaar_target is not None:
+            task_tap(serial, *bazaar_target)
+            confirmations = 0
+            print("已确认关闭礼包或万象杂货铺，等待主城恢复", flush=True)
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+            continue
         if gather_search_page(image):
             leave_gather(serial, image)
             confirmations = 0
@@ -575,8 +673,11 @@ def return_to_city(serial, help_template, nav_template, text_template, reconnect
                 return True
         else:
             confirmations = 0
-            target = social_back_target(image)
-            action = "关闭聊天或领主点赞页面"
+            target = treasure_dispatch_close(image)
+            action = "关闭寻宝派遣弹窗"
+            if target is None:
+                target = social_back_target(image)
+                action = "关闭聊天或领主点赞页面"
             if target is None and intelligence_page(image):
                 target, action = (60, 190), "退出情报任务页面"
             if target is None and treasure_page(image):
@@ -627,6 +728,9 @@ def return_to_city(serial, help_template, nav_template, text_template, reconnect
                 target, action = (540, 2100), "退出完整英雄招募展示"
             if target is None and chat_page(image):
                 target, action = (60, 190), "退出聊天"
+            if target is None and (island_help.ranking(sys.modules[__name__], image)
+                                   or island_help.visitor(sys.modules[__name__], image)):
+                target, action = (60, 190), "退出海岛互助页面"
             if target is None and island_template is not None and island_page(image, island_template):
                 target, action = (60, 190), "退出海岛"
             if target is None:
@@ -640,9 +744,18 @@ def return_to_city(serial, help_template, nav_template, text_template, reconnect
                 action = "退出情报任务页面"
             if target is None and town_button(image):
                 target, action = (960, 2230), "从野外返回城镇"
+            if target is None and task_rewards.page(sys.modules[__name__], image) is not None:
+                target, action = (1030, 460), "关闭任务奖励弹窗"
             if target is not None:
                 unknown_frames = 0
                 task_tap(serial, *target)
+                if (action == "关闭联盟弹窗或退出联盟页面" and target == (60, 190)
+                        and task_page(image, {"tech-title": open_template(
+                            ROOT / "assets/emulator-tech-title.png").convert("L")}, "tech-title")):
+                    if frozen_tech is None:
+                        frozen_tech = image.copy()
+                        tech_first_back = time.monotonic()
+                    tech_back_attempts += 1
                 if action == "从野外返回城镇":
                     town_attempts += 1
                     if frozen_navigation is None:
@@ -682,6 +795,17 @@ def return_to_city(serial, help_template, nav_template, text_template, reconnect
             raise RuntimeError("当前前台不是目标游戏，未重新打开")
         print("野外返回城镇多次未生效且画面冻结，重新打开无尽冬日一次", flush=True)
         return reopen_frozen_game(serial, help_template, nav_template, text_template, reconnect_template)
+    # The October 16 technology tree ignored every calibrated Back tap for
+    # ten minutes. Only reopen after the full navigation timeout, repeated
+    # known exits, and continuously unchanged full frames. A page that changed
+    # and later returned to the same frame is not evidence of a freeze.
+    if (_reopen_frozen and tech_back_attempts >= 2 and frozen_tech_unchanged
+            and tech_first_back is not None and time.monotonic() - tech_first_back >= 15):
+        check_stop()
+        if not game_foreground(serial):
+            raise RuntimeError("当前前台不是目标游戏，未重新打开")
+        print("联盟科技返回多次未生效且画面冻结，重新打开无尽冬日一次", flush=True)
+        return reopen_frozen_game(serial, help_template, nav_template, text_template, reconnect_template)
     raise RuntimeError(f"{timeout:g} 秒内仍未确认主城，已停止")
 
 
@@ -702,8 +826,11 @@ def reopen_frozen_game(serial, help_template, nav_template, text_template, recon
         loading_deadline = time.monotonic() + 180
         while time.monotonic() < loading_deadline:
             check_stop()
-            if game_foreground(serial) and game_loaded(screenshot(serial)):
-                break
+            if game_foreground(serial):
+                image = screenshot(serial)
+                check_game_guide(image)
+                if game_loaded(image):
+                    break
             time.sleep(2)
         else:
             if attempt == 2:
@@ -734,7 +861,14 @@ def intelligence_page(image):
         return True
     # The lower-level lighthouse title sits five pixels higher. Match the
     # lettering locally without depending on the map background/animation.
-    return find_white(image, template, range(130, 151, 2), range(150, 181, 2))[0] >= .94
+    score = find_white(image, template, range(130, 151, 2), range(150, 181, 2))[0]
+    return score >= .94 or (score >= .85 and header_text(image, "情报"))
+
+
+def header_text(image, label):
+    """Read only a near-matching page's fixed top-left title."""
+    return any(re.sub(r"\s+", "", text) == label for text, _ in
+               recognize_text(image.crop((120, 140, 380, 235))))
 
 
 def intelligence_entry_target(image):
@@ -784,6 +918,10 @@ def intelligence_refresh_countdown(image):
     return None
 
 
+class QueueCapacityUnavailable(RuntimeError):
+    pass
+
+
 def intelligence_queue_full(image):
     lines = [text.replace(" ", "") for text, _ in recognize_text(image.crop((0, 430, 395, 1250)))]
     if not any("行军" in text for text in lines):
@@ -791,7 +929,7 @@ def intelligence_queue_full(image):
     fraction = next((re.search(r"(\d+)\s*[/／]\s*(\d+)", text) for text in lines
                      if re.search(r"(\d+)\s*[/／]\s*(\d+)", text)), None)
     if fraction is None or int(fraction[2]) == 0:
-        raise RuntimeError("野外行军队列容量未识别，未发起任务")
+        raise QueueCapacityUnavailable("野外行军队列容量未识别，未发起任务")
     return int(fraction[1]) >= int(fraction[2])
 
 
@@ -879,7 +1017,7 @@ def bounty_target(image):
         if match > best and sum(r > 200 and 80 < g < 210 and b < 90 for r, g, b in pixels) > 400:
             best = match
     score, x, y = best
-    return (x + template.width // 2, y + template.height // 2) if score >= .93 else None
+    return (x + template.width // 2, y + template.height // 2) if score >= .95 else None
 
 
 def bounty_name(image):
@@ -1058,7 +1196,10 @@ def execute_intelligence(serial, image, bounty_trip=None):
             if signature == last_action:
                 time.sleep(1)
                 continue
-            if town_button(image) and intelligence_queue_full(image):
+            # Monster cards cover the march drawer's capacity. The unobscured
+            # queue was checked before opening the intelligence map.
+            monster_card = any("推荐实力" in text for text in texts)
+            if town_button(image) and not monster_card and intelligence_queue_full(image):
                 print("野外行军队列已满，跳过当前情报任务", flush=True)
                 return image, False
             if bounty_trip is not None:
@@ -1081,6 +1222,12 @@ def enter_wilderness(serial, image, help_template, nav_template, label):
     # A city/map switch first shows a full-screen white transition. Do not
     # treat that animation as a failed task or tap again while it is loading.
     for _ in range(30):
+        interruption = secret_choice_close_target(image) or bazaar_close_target(image)
+        if interruption is not None:
+            task_tap(serial, *interruption)
+            image = task_screen(serial)
+            switched = False
+            continue
         if town_button(image):
             return check_wilderness_healing(serial, image)
         if not switched and inspect(image.convert("L"), help_template, nav_template)[0]:
@@ -1176,12 +1323,12 @@ def run_intelligence(serial, help_template, nav_template, text_template, reconne
                         break
                 print("情报界面已无待执行任务图标，结束灯塔情报", flush=True)
                 break
-            # Own missions are still marching; let their checks/rewards settle.
-            task_tap(serial, 60, 190)
-            image = task_screen(serial)
-            time.sleep(2)
-            image = open_intelligence(serial, image)
-            continue
+            # Own missions may march for minutes. Yield to other scheduled
+            # tasks instead of repeatedly leaving/reopening this map forever.
+            # The next check still verifies completion and claims its reward.
+            record_timer(timers, "intelligence", 60, "情报任务结果复查")
+            print("情报任务仍在进行，60 秒后复查结果，先继续其他任务", flush=True)
+            break
         task_tap(serial, *target)
         image = wait_intelligence_detail(serial, task_screen(serial), target)
         if intelligence_page(image) and intelligence_completed(image, target):
@@ -1204,7 +1351,15 @@ def run_intelligence(serial, help_template, nav_template, text_template, reconne
 
 def gather_search_page(image):
     template = open_template(ROOT / "assets/emulator-gather-search.png").convert("L")
-    return difference(image.crop((485, 2200, 605, 2285)).convert("L"), template) <= 15
+    box = (485, 2200, 605, 2285)
+    gray = image.convert("L")
+    score = minimum_difference(gray, template, box, range(-2, 3), range(-2, 3))[0]
+    if score <= 15:
+        return True
+    # The phone's button backing varies slightly after an empty search. Keep
+    # the colour/shape score bounded and independently verify the white glyphs.
+    return score <= 20 and minimum_difference(
+        white_mask(gray), white_mask(template), box, range(-2, 3), range(-2, 3))[0] <= 15
 
 
 def gather_level_max(image):
@@ -1238,7 +1393,7 @@ def set_gather_level(serial, image, level):
 
 def gather_notice(image):
     texts = [re.sub(r"\s+", "", text) for text, _ in
-             recognize_text(image.crop((80, 650, 1000, 1650)))]
+             recognize_text(image.crop((80, 650, 1000, 2050)))]
     if "附近没有发现条件相符的目标" in "".join(texts):
         return "no_target"
     for text in texts:
@@ -1269,11 +1424,17 @@ def leave_gather(serial, image):
     raise RuntimeError("跳过采集后未确认野外界面")
 
 
+def gather_action_target(image):
+    # "采集速度" opens buffs. Only the complete button label is an action.
+    return hunting.button_target(sys.modules[__name__], image, ("采集",), (350, 1100, 730, 1600))
+
+
 def search_gather_target(serial, image, resource, level):
     label = GATHER_RESOURCES[resource]
     while True:
-        # Re-read immediately before every search, including lower-level
-        # retries. The previous dispatch frame may still show the old queue.
+        # Check a fresh, unobscured frame before every search, including
+        # lower-level retries. Resource cards can cover the queue capacity,
+        # so dispatch uses this check without closing and searching again.
         image = task_screen(serial)
         if intelligence_queue_full(image):
             return image, None, "queue_full"
@@ -1286,7 +1447,7 @@ def search_gather_target(serial, image, resource, level):
                 return image, None, notice
             if notice == "no_target":
                 break
-            target = intelligence_text_target(image, ("采集",), (350, 1200, 730, 1310))
+            target = gather_action_target(image)
             if target is not None:
                 return image, target, None
         else:
@@ -1306,16 +1467,16 @@ def gather_full_only(image):
 def gather_back_target(image):
     if gather_search_page(image):
         return None  # Search drawers must be closed with task_back.
-    if intelligence_text_target(image, ("采集",), (350, 1200, 730, 1310)):
+    if gather_action_target(image):
         return 540, 1550
-    if intelligence_text_target(image, tuple(GATHER_RESOURCES.values()), (120, 150, 360, 235)):
+    if intelligence_text_target(image, (*GATHER_RESOURCES.values(), "城镇增益"), (120, 150, 360, 235)):
         return 60, 190
     return None
 
 
-def prepare_gather_search(serial, image, resource, level=1):
+def prepare_gather_search(serial, image, resource, level=1, full_only=True):
     label = GATHER_RESOURCES[resource]
-    for _ in range(4):
+    for attempt in range(4):
         if not gather_search_page(image):
             raise RuntimeError("未确认资源搜索界面")
         target = intelligence_text_target(image, (label,), (0, 1790, 1080, 1880))
@@ -1323,7 +1484,21 @@ def prepare_gather_search(serial, image, resource, level=1):
             task_tap(serial, *target)
             image = task_screen(serial)
             break
-        start, end = (900, 200) if resource in ("coal", "iron") else (200, 900)
+        # Monster searches leave this shared carousel at its left end. Resource
+        # searches must move toward the requested category, even after hunting.
+        categories = ("失控的雪怪", "野兽", "冰原巨兽", "大型养殖场", *GATHER_RESOURCES.values())
+        desired = categories.index(label)
+        visible = [categories.index(text.replace(" ", "")) for text, _ in
+                   recognize_text(image.crop((0, 1790, 1080, 1880)))
+                   if text.replace(" ", "") in categories]
+        if target is not None:
+            left = target[0] > 970
+        elif visible:
+            left = desired > min(visible)
+        else:
+            # Unknown text must not cause four identical swipes at an endpoint.
+            left = attempt < 2
+        start, end = (900, 200) if left else (200, 900)
         if not game_foreground(serial):
             raise RuntimeError("当前前台不是目标游戏，已停止")
         adb(serial, "shell", "input", "swipe", str(start), "1780", str(end), "1780", "600")
@@ -1331,34 +1506,46 @@ def prepare_gather_search(serial, image, resource, level=1):
     else:
         raise RuntimeError(f"搜索栏未找到完整的{label}图标")
     image = set_gather_level(serial, image, level)
-    if not gather_full_only(image):
+    if gather_full_only(image) != full_only:
         task_tap(serial, 328, 2135)
         image = task_screen(serial)
-    if not gather_search_page(image) or not gather_full_only(image):
-        raise RuntimeError("未确认勾选仅搜索资源为满的资源点")
+    if not gather_search_page(image) or gather_full_only(image) != full_only:
+        raise RuntimeError("未确认仅搜索资源为满的资源点选项与配置一致")
     return image
 
 
+def parse_gather_step(value):
+    import argparse
+    resource, separator, level = value.partition(":")
+    if resource not in GATHER_RESOURCES or not separator or level not in tuple(str(i) for i in range(1, 9)):
+        raise argparse.ArgumentTypeError("采集子选项必须为资源:等级，例如 wood:7")
+    return resource, int(level)
+
+
 def run_gather(serial, help_template, nav_template, text_template, reconnect_template,
-               resources=tuple(GATHER_RESOURCES), levels=None):
-    if not resources or any(resource not in GATHER_RESOURCES for resource in resources):
-        raise ValueError("至少要勾选一项有效资源")
-    levels = {resource: (levels or {}).get(resource, 1) for resource in resources}
-    if any(type(level) is not int or not 1 <= level <= 8 for level in levels.values()):
+               resources=tuple(GATHER_RESOURCES), levels=None, steps=None, full_only=True,
+               return_monitor=None):
+    if steps is None:
+        if not resources or any(resource not in GATHER_RESOURCES for resource in resources):
+            raise ValueError("至少要选择一项有效资源")
+        steps = [(resource, (levels or {}).get(resource, 1)) for resource in resources]
+    if not 1 <= len(steps) <= 6 or any(resource not in GATHER_RESOURCES for resource, _ in steps):
+        raise ValueError("资源采集必须配置 1 到 6 个有效子选项")
+    if any(type(level) is not int or not 1 <= level <= 8 for _, level in steps):
         raise ValueError("资源采集等级必须是 1 到 8 的整数")
     image = enter_wilderness(serial, task_screen(serial), help_template, nav_template, "资源采集")
-    for resource, label in GATHER_RESOURCES.items():
-        if resource not in resources:
-            continue
+    for resource, level in steps:
+        label = GATHER_RESOURCES[resource]
         image = task_screen(serial)
         if not town_button(image):
             raise RuntimeError("采集前未确认野外界面")
         if intelligence_queue_full(image):
             print("野外行军队列已满，跳过剩余资源采集", flush=True)
             break
+        before_dispatch = image
         task_tap(serial, 65, 1735)
-        image = prepare_gather_search(serial, task_screen(serial), resource, levels[resource])
-        image, target, notice = search_gather_target(serial, image, resource, levels[resource])
+        image = prepare_gather_search(serial, task_screen(serial), resource, level, full_only=full_only)
+        image, target, notice = search_gather_target(serial, image, resource, level)
         if target is None:
             image = leave_gather(serial, image)
             if notice == "queue_full":
@@ -1368,11 +1555,6 @@ def run_gather(serial, help_template, nav_template, text_template, reconnect_tem
                 print("士兵不足，跳过本轮采集，在野外等待其他自动任务", flush=True)
                 break
             continue
-        # Search may take time; check the current queue again before gathering.
-        if intelligence_queue_full(image):
-            image = leave_gather(serial, image)
-            print("野外行军队列已满，跳过剩余资源采集", flush=True)
-            break
         task_tap(serial, *target)
         for _ in range(5):
             image = task_screen(serial)
@@ -1395,6 +1577,8 @@ def run_gather(serial, help_template, nav_template, text_template, reconnect_tem
         else:
             raise RuntimeError(f"{label}采集出征后未返回野外界面")
         print(f"已派遣{label}采集队伍", flush=True)
+        if return_monitor is not None:
+            return_monitor.dispatched(before_dispatch, image)
     if not town_button(image):
         raise RuntimeError("采集结束后未确认野外界面")
     return image
@@ -1454,6 +1638,11 @@ def explore_page_box(image, templates, name):
     box = EXPLORE_BOXES[name]
     if difference(image.crop(box).convert("L"), templates[name]) < 15:
         return box
+    if name == "title":
+        score, dx, dy = minimum_difference(image.convert("L"), templates[name], box,
+                                           range(-2, 3), range(-2, 3))
+        if score < 15:
+            return box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy
     if name == "income":
         # The pre-200-stage equipment hint makes this modal taller, moving
         # its title/close button up and its claim button down.
@@ -1461,6 +1650,15 @@ def explore_page_box(image, templates, name):
                                  range(box[1] - 70, box[1] + 71, 4))
         if score >= .95:
             return x, y, x + templates[name].width, y + templates[name].height
+        score, dx, dy = minimum_difference(image.convert("L"), templates[name], box,
+                                           range(-4, 5), range(-70, 71))
+        if score < 15:
+            return box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy
+        if score < 20:
+            candidate = (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
+            if any(text.replace(" ", "") == "挂机收益" for text, _ in
+                   recognize_text(image.crop(candidate))):
+                return candidate
     return None
 
 
@@ -1550,6 +1748,12 @@ def recruit_hero_exit_page(image):
             or ("您已拥有该英雄" in text and "自动转换为" in text))
 
 
+def recruit_result_exit_target(image):
+    # Centered Nox results put the old header-back coordinate in black padding.
+    # Prefer the independently confirmed exit hint without touching recruit-again.
+    return (540, 2100) if recruit_hero_exit_page(image) else (60, 190)
+
+
 def run_explore(serial, help_template, nav_template, templates, timers=None):
     def wait_for(image, confirmed, error):
         for attempt in range(5):
@@ -1635,6 +1839,7 @@ def run_explore(serial, help_template, nav_template, templates, timers=None):
 
 def task_drawer(serial, image, templates, reset_unknown=True, _reopen_frozen=True):
     global TASK_DRAWER_SCROLL
+    check_game_guide(image)
     frozen = image.copy() if closed_city_drawer(image, templates["drawer-open"]) else None
     started = time.monotonic()
     if not task_page(image, templates, "drawer-open"):
@@ -1758,7 +1963,7 @@ def task_label(serial, image, templates, name):
 
 def run_city_tasks(serial, help_template, nav_template, templates,
                    initial_image=None, keep_open=False, donate=True, recruit=True, timers=None,
-                   recruit_kind="recruit_advanced"):
+                   recruit_kind="recruit_advanced", collect_alliance_chests=False):
     def wait_page(image, predicate):
         for attempt in range(6):
             if predicate(image):
@@ -1807,6 +2012,7 @@ def run_city_tasks(serial, help_template, nav_template, templates,
                 adb(serial, "shell", "input", "swipe", "760", "1810", "760", "1810", "3000")
                 image = task_screen(serial)
                 for _ in range(5):
+                    image = wait_page(image, lambda im: task_page(im, templates, "tech-detail"))
                     if not task_page(image, templates, "tech-detail"):
                         raise RuntimeError("长按后未能确认科技详情")
                     if not resource_donation_available(image) or difference(before, image.crop(count_box)) >= 3:
@@ -1818,6 +2024,7 @@ def run_city_tasks(serial, help_template, nav_template, templates,
                     task_tap(serial, 760, 1810)
                     image = task_screen(serial)
                     for attempt in range(5):
+                        image = wait_page(image, lambda im: task_page(im, templates, "tech-detail"))
                         if not task_page(image, templates, "tech-detail"):
                             raise RuntimeError("单次捐献后未能确认科技详情")
                         if not resource_donation_available(image) or difference(before, image.crop(count_box)) >= 3:
@@ -1840,6 +2047,10 @@ def run_city_tasks(serial, help_template, nav_template, templates,
         image = wait_page(task_screen(serial), alliance)
         if not task_page(image, templates, "alliance-title") or task_page(image, templates, "tech-title"):
             raise RuntimeError("未能从联盟科技返回联盟")
+        if collect_alliance_chests:
+            image = alliance_chests.collect_on_alliance(sys.modules[__name__], serial, image)
+            if timers is not None:
+                timers['alliance_chests'] = time.monotonic() + 600
         task_tap(serial, 60, 190)
         image = wait_page(task_screen(serial), lambda im: inspect(im.convert("L"), help_template, nav_template)[0])
         if not inspect(image.convert("L"), help_template, nav_template)[0]:
@@ -1862,8 +2073,16 @@ def run_city_tasks(serial, help_template, nav_template, templates,
                      recognize_text(image.crop((240, row_bottom, 550, row_bottom + 55)))):
                 free_y = row_bottom
         if free_y is None:
-            record_timer(timers, recruit_kind, countdown(image, (125, row_bottom, 550, row_bottom + 55))
+            remaining = (countdown(image, (125, row_bottom, 550, row_bottom + 55))
                          if row_bottom is not None else None)
+            if row_bottom is not None and remaining is None:
+                # A missing drawer hint is not evidence of a cooldown. The
+                # recruitment page independently proves free/cooldown before
+                # any recruitment tap, including when drawer text is clipped.
+                free_y = row_bottom
+                print(f"{RECRUIT_TYPES[recruit_kind]}抽屉状态未识别，进入招募页核实", flush=True)
+            else:
+                record_timer(timers, recruit_kind, remaining)
     if free_y is not None:
         if not on_recruit_page:
             task_tap(serial, 600, row_bottom + 15)
@@ -1916,7 +2135,7 @@ def run_city_tasks(serial, help_template, nav_template, templates,
             if result_page == "hero":
                 task_tap(serial, 540, 2100)
             else:
-                task_tap(serial, 60, 190)
+                task_tap(serial, *recruit_result_exit_target(image))
             reward_closed = result_page == "reward"
             for _ in range(5):
                 image = task_screen(serial)
@@ -1924,7 +2143,7 @@ def run_city_tasks(serial, help_template, nav_template, templates,
                     break
                 # 已拥有的完整英雄会先回到奖励列表，再返回招募页。
                 if not reward_closed and task_page(image, templates, "reward-title"):
-                    task_tap(serial, 60, 190)
+                    task_tap(serial, *recruit_result_exit_target(image))
                     reward_closed = True
             else:
                 raise RuntimeError("未能从奖励页返回英雄招募")
@@ -1971,8 +2190,9 @@ def training_page(image, title):
     return (difference(crop.convert("L"), title.convert("L")) <= 3
             or difference(white_mask(crop), white_mask(title)) <= 10
             # Selecting a lower tier changes the name prefix, not the unit type.
-            or difference(white_mask(crop.crop((140, 0, 280, 90))),
-                          white_mask(title.crop((140, 0, 280, 90)))) <= 10)
+            or minimum_difference(white_mask(image),
+                                  white_mask(title.crop((140, 0, 280, 90))),
+                                  (540, 140, 680, 230), range(-2, 3), range(-2, 3))[0] <= 10)
 
 
 def resource_more_target(image):
@@ -2316,7 +2536,14 @@ def parse_countdown(text):
 
 
 def countdown(image, box):
-    values = [parse_countdown(text) for text, _ in recognize_text(image.crop(box))]
+    lines = [text.strip() for text, _ in recognize_text(image.crop(box))]
+    # Pet icons put days above the clock; treating the clock alone loses days.
+    for index, line in enumerate(lines[:-1]):
+        if re.fullmatch(r"\d+\s*天", line):
+            seconds = parse_countdown(line + lines[index + 1])
+            if seconds is not None:
+                return seconds
+    values = [parse_countdown(text) for text in lines]
     return next((value for value in values if value is not None), None)
 
 
@@ -2335,7 +2562,19 @@ def record_timer(timers, name, seconds, label=None):
 
 def pet_page(image):
     with open_template(ROOT / "assets/emulator-pet-title.png") as template:
-        return difference(image.crop(PET_TITLE_BOX).convert("L"), template.convert("L")) < 15
+        score, _, _ = minimum_difference(image.convert("L"), template.convert("L"),
+                                         PET_TITLE_BOX, range(-2, 3), range(-2, 3))
+        return score < 15 or (score <= 30 and any(
+            text.replace(" ", "") == "宠物技能" for text, _ in
+            recognize_text(image.crop((400, 455, 680, 550)))))
+
+
+def pet_skill_available(image, target):
+    """A locked/unreleased slot is plain panel background, not a skill tile."""
+    x, y = target
+    pixels = list(image.convert("RGB").crop((x - 65, y - 65, x + 65, y + 65)).getdata())
+    icon = sum(max(pixel) - min(pixel) > 40 or max(pixel) < 130 for pixel in pixels)
+    return icon > len(pixels) * .2
 
 
 def pet_skill_state(image, label):
@@ -2350,13 +2589,14 @@ def pet_skill_state(image, label):
     for hint in hints:
         if hint.startswith("冷却中"):
             seconds = parse_countdown(re.sub(r"^冷却中[:：]?", "", hint))
-            if seconds is None:
-                # OCR can turn the prefix punctuation into an extra digit.
-                # Read the selected skill's own icon instead of guessing digits.
-                target = next((target for skill, target in PET_SKILLS.values() if skill == label), None)
-                if target is not None:
-                    x, y = target
-                    seconds = countdown(image, (x - 100, y + 20, x + 110, y + 110))
+            # Prefix punctuation can become a valid extra digit (e.g. 1 day
+            # becomes 11 days). Independently read the selected icon too.
+            target = next((target for skill, target in PET_SKILLS.values() if skill == label), None)
+            if target is not None:
+                x, y = target
+                icon_seconds = countdown(image, (x - 100, y + 20, x + 110, y + 110))
+                if icon_seconds is not None:
+                    seconds = icon_seconds
             return "cooldown", seconds
     # Only an explicitly labelled, coloured use button is actionable.
     pixels = list(image.crop((350, 1870, 420, 1940)).convert("RGB").getdata())
@@ -2380,7 +2620,7 @@ def pet_reward_page(image):
         if difference(image.crop((380, 680, 700, 790)).convert("L"), title.convert("L")) >= 15:
             return False
     return any("点击任意位置退出" in text.replace(" ", "")
-               for text, _ in recognize_text(image.crop((280, 2130, 800, 2250))))
+               for text, _ in recognize_text(image.crop((250, 1850, 850, 2280))))
 
 
 def run_pet_skill(serial, help_template, nav_template, drawer_template, name, timers,
@@ -2405,11 +2645,24 @@ def run_pet_skill(serial, help_template, nav_template, drawer_template, name, ti
             image = task_screen(serial)
     else:
         raise RuntimeError("未打开宠物技能弹窗")
+    if not pet_skill_available(image, target):
+        print(f"{label} 当前未显示技能图标，跳过空位，10 分钟后复查", flush=True)
+        if timers is not None:
+            timers[name] = time.monotonic() + 600
+        return image if keep_open else close_pet_page(serial, image, help_template, nav_template)
     task_tap(serial, *target)
     image = task_screen(serial)
     state, seconds = pet_skill_state(image, label)
     if state == "ready":
         task_tap(serial, 540, 1910)
+        if name == "pet_transport":
+            # Transport stays active after use; continue the batch without
+            # reading its post-use state or countdown.
+            image = task_screen(serial)
+            if timers is not None:
+                timers[name] = float("inf")
+            print(f"已使用宠物技能：{label}", flush=True)
+            return image if keep_open else close_pet_page(serial, image, help_template, nav_template)
         for _ in range(5):
             image = task_screen(serial)
             if not pet_page(image) and pet_reward_page(image):
@@ -2426,8 +2679,8 @@ def run_pet_skill(serial, help_template, nav_template, drawer_template, name, ti
         print(f"{label} 使用状态未识别，本次不点击", flush=True)
     if state == "active":
         if timers is not None:
-            timers[name] = time.monotonic() + 600
-        print(f"{label} 生效中，不重复使用；10 分钟后复查", flush=True)
+            timers[name] = float("inf")
+        print(f"{label} 生效中，不重复使用，继续下一个技能", flush=True)
     else:
         record_timer(timers, name, seconds, label)
     if not keep_open or state == "unknown":
@@ -2478,7 +2731,8 @@ def treasure_page(image):
     with open_template(ROOT / "assets/emulator-treasure-title.png") as title:
         # Account variants use a different blue header and slightly shifted text.
         # Match the white title lettering, as for recruit and intelligence pages.
-        return find_white(image, title, [140], [165])[0] >= .90
+        score = find_white(image, title, [140], [165])[0]
+        return score >= .90 or (score >= .80 and header_text(image, "宠物寻宝"))
 
 
 def treasure_remaining(image):
@@ -2490,10 +2744,40 @@ def treasure_remaining(image):
         match = re.fullmatch(r"今日剩余寻宝次数[:：]?(\d+)", text.replace(" ", "").strip())
         if match:
             return int(match[1])
+        if re.fullmatch(r"今日剩余寻宝次数[:：]?[OoＯ]", text.replace(" ", "").strip()):
+            # The full line can read the zero as O. Require a separate numeric
+            # read of its fixed count location instead of substituting a value.
+            values = [int(value.strip()) for value, _ in
+                      recognize_text(image.crop((680, 285, 755, 365)))
+                      if re.fullmatch(r"\d", value.strip())]
+            return values[0] if len(values) == 1 else None
     return None
 
 
+def treasure_dispatch_close(image):
+    """Locate the dispatch header and its close icon as the pet list resizes."""
+    with open_template(ROOT / "assets/emulator-treasure-dispatch-title.png") as title:
+        score, _, y = find_white(image, title, range(420, 441, 4), range(350, 901, 8))
+    if score < .90:
+        return None
+    with open_template(ROOT / "assets/emulator-treasure-dispatch-close.png") as close:
+        score, x, y = find_white(image, close, range(960, 981, 4), range(y, y + 11, 2))
+        if score >= .94:
+            return x + close.width // 2, y + close.height // 2
+    return None
+
+
+def treasure_action_target(image, label):
+    # A short pet list moves Start above the old y=1700 crop; taller lists can
+    # move it below y=1940. Keep the detail page's separate dispatch button crop.
+    box = (300, 1450, 780, 2120) if label == "开始寻宝" else (300, 1700, 780, 1940)
+    return intelligence_text_target(image, (label,), box)
+
+
 def treasure_back_target(image):
+    close = treasure_dispatch_close(image)
+    if close is not None:
+        return close
     if treasure_page(image):
         return 60, 190
     if intelligence_text_target(image, ("联盟宝藏",), (400, 470, 680, 550)):
@@ -2502,8 +2786,6 @@ def treasure_back_target(image):
         return 960, 640
     if intelligence_text_target(image, ("寻宝中",), (350, 680, 730, 810)):
         return 960, 680
-    if intelligence_text_target(image, ("开始寻宝",), (300, 1700, 780, 1940)):
-        return 995, 610
     if intelligence_text_target(image, ("寻宝派遣",), (300, 1700, 780, 1940)):
         return 960, 595
     return None
@@ -2523,10 +2805,12 @@ def treasure_completed_target(image, near=None):
     return None
 
 
-def treasure_chest_target(image):
+def treasure_chest_target(image, excluded=()):
     if not treasure_page(image):
         return None
     gray = image.convert("L")
+    for x, y in excluded:
+        gray.paste(0, (max(0, x - 100), max(0, y - 95), min(1080, x + 105), min(2340, y + 110)))
     # 倒计时位于正在寻宝宝箱下方；遮住其本体，避免点进无派遣按钮的弹窗。
     for text, (x, y, width, _) in recognize_text(image.crop((0, 430, 1080, 2050))):
         if parse_countdown(text) is not None:
@@ -2552,8 +2836,6 @@ def treasure_chest_target(image):
 
 def treasure_share_target(image):
     """Match the sampled alliance treasure share button inside the claim dialog."""
-    if image.size != EXPECTED_SIZE:
-        return None
     with open_template(ROOT / "assets/emulator-treasure-share.png") as button:
         score, dx, dy = minimum_difference(
             image.convert("L"), button.convert("L"), (810, 1720, 895, 1810),
@@ -2561,6 +2843,63 @@ def treasure_share_target(image):
         if score <= 12:
             return 852 + dx, 1765 + dy
     return None
+
+
+def share_treasure(serial, image):
+    """Share a claimed alliance chest before closing its completion dialog."""
+    share = treasure_share_target(image)
+    if share is None:
+        return image
+    task_tap(serial, *share)
+    for _ in range(5):
+        image = task_screen(serial)
+        if (intelligence_text_target(image, ("寻宝完成",), (350, 680, 730, 810))
+                and treasure_share_target(image) is None):
+            print("已分享宠物寻宝宝藏", flush=True)
+            return image
+    raise RuntimeError("宝藏分享后未确认分享按钮消失")
+
+
+def treasure_pets_unavailable(image):
+    if treasure_dispatch_close(image) is None:
+        return False
+    texts = "".join(re.sub(r"\s+", "", text) for text, _ in
+                    recognize_text(image.crop((70, 800, 1010, 2120))))
+    # Six visible pets are all blocked; do not treat a selected weak pet as
+    # evidence that the other pets cannot go, or retry an impossible mission.
+    return ("无法进行本次寻宝" in texts
+            and len(re.findall("实力不足|寻宝中", texts)) >= 6)
+
+
+def close_treasure_to_map(serial, image):
+    for _ in range(5):
+        if treasure_page(image):
+            return image
+        target = treasure_back_target(image)
+        if target is None:
+            raise RuntimeError("无法确认寻宝弹窗退出按钮")
+        task_tap(serial, *target)
+        image = task_screen(serial)
+    raise RuntimeError("关闭寻宝弹窗后未确认寻宝地图")
+
+
+def dispatch_treasure(serial, target):
+    task_tap(serial, *target)
+    for label in ("寻宝派遣", "开始寻宝"):
+        for _ in range(5):
+            image = task_screen(serial)
+            if stamina_refill_target(image) is not None:
+                return leave_treasure_stamina(serial, image), "stamina"
+            if label == "开始寻宝" and treasure_pets_unavailable(image):
+                print("该藏宝点的宠物实力不足或宠物忙碌，尝试其他藏宝点", flush=True)
+                return close_treasure_to_map(serial, image), "unavailable"
+            action = treasure_action_target(image, label)
+            if action is not None:
+                break
+        else:
+            raise RuntimeError(f"宠物寻宝未确认{label}按钮")
+        task_tap(serial, *action)
+    return image, None
 
 
 def claim_treasure(serial, image):
@@ -2577,7 +2916,7 @@ def claim_treasure(serial, image):
     task_tap(serial, 540, 1490)
     for _ in range(10):
         image = task_screen(serial)
-        if intelligence_text_target(image, ("点击任意位置退出",), (280, 2130, 800, 2250)):
+        if intelligence_text_target(image, ("点击任意位置退出",), (250, 1850, 850, 2280)):
             task_tap(serial, 540, 2100)
             break
     else:
@@ -2585,17 +2924,7 @@ def claim_treasure(serial, image):
     for _ in range(5):
         image = task_screen(serial)
         if intelligence_text_target(image, ("寻宝完成",), (350, 680, 730, 810)):
-            share = treasure_share_target(image)
-            if share is not None:
-                task_tap(serial, *share)
-                for _ in range(5):
-                    image = task_screen(serial)
-                    if (intelligence_text_target(image, ("寻宝完成",), (350, 680, 730, 810))
-                            and treasure_share_target(image) is None):
-                        print("已分享宠物寻宝宝藏", flush=True)
-                        break
-                else:
-                    raise RuntimeError("宝藏分享后未确认分享按钮消失")
+            image = share_treasure(serial, image)
             task_tap(serial, 960, 640)
             continue
         if treasure_page(image) and treasure_completed_target(image, near=target) is None:
@@ -2608,6 +2937,7 @@ def claim_alliance_treasure(serial, image):
     if not treasure_page(image) or not red_dot(image, (980, 2150, 1020, 2190)):
         return image
     task_tap(serial, 950, 2220)
+    switched_tab = False
     for _ in range(5):
         image = task_screen(serial)
         if intelligence_text_target(image, ("联盟宝藏",), (400, 470, 680, 550)):
@@ -2615,12 +2945,19 @@ def claim_alliance_treasure(serial, image):
             target = intelligence_text_target(image, ("一键领取",), (250, 1790, 830, 1990))
             if target is not None:
                 break
+            # Newly earned personal chests open "我的分享" by default. The
+            # notification can mean an unshared chest, not claimable rewards.
+            if not switched_tab:
+                tab = intelligence_text_target(image, ("盟友分享",), (550, 570, 1000, 700))
+                if tab is not None:
+                    task_tap(serial, *tab)
+                    switched_tab = True
     else:
         raise RuntimeError("联盟宝藏未确认一键领取按钮")
     task_tap(serial, *target)
     for _ in range(10):
         image = task_screen(serial)
-        if intelligence_text_target(image, ("点击任意位置退出",), (280, 2130, 800, 2250)):
+        if intelligence_text_target(image, ("点击任意位置退出",), (250, 1850, 850, 2280)):
             task_tap(serial, 540, 2100)
             break
     else:
@@ -2669,6 +3006,7 @@ def run_treasure(serial, help_template, nav_template, drawer_template):
     image = task_drawer(serial, image, templates, reset_unknown=False)
     target = None
     completed = False
+    own_ready = False
     # 低等级账号的寻宝行位于抽屉底部，状态文字可延伸到 y=1570。
     # 原来的 y=1470 边界会裁掉整行，即使列表已滚到底也无法识别。
     drawer_box = (240, 710, 550, 1590)
@@ -2679,8 +3017,10 @@ def run_treasure(serial, help_template, nav_template, drawer_template):
         if row_bottom is not None and row_bottom + 55 <= drawer_box[3]:
             completed = intelligence_text_target(
                 image, ("已完成",), (240, row_bottom, 550, row_bottom + 55)) is not None
-            if completed or intelligence_text_target(image, ("可寻宝",), (240, row_bottom, 550, row_bottom + 55)):
-                target = (605, row_bottom + 15)
+            own_ready = completed or intelligence_text_target(
+                image, ("可寻宝",), (240, row_bottom, 550, row_bottom + 55)) is not None
+            # Shared alliance rewards can be ready while our pets are busy.
+            target = (605, row_bottom + 15)
             break
         if attempt == 0:
             # 先检查当前抽屉，找不到该行才回到顶部重新向下扫描。
@@ -2692,7 +3032,7 @@ def run_treasure(serial, help_template, nav_template, drawer_template):
         if attempt < DRAWER_SWIPES + 1:
             image = swipe_drawer(serial, drawer_template)
     if target is None:
-        print("抽屉里没有宠物可寻宝或已完成提示，跳过宠物寻宝", flush=True)
+        print("抽屉里没有宠物寻宝任务行，跳过宠物寻宝", flush=True)
         return image
     task_tap(serial, *target)
     for _ in range(5):
@@ -2703,6 +3043,9 @@ def run_treasure(serial, help_template, nav_template, drawer_template):
     else:
         raise RuntimeError("未确认宠物寻宝页面或今日剩余寻宝次数")
     image = claim_alliance_treasure(serial, image)
+    if not own_ready and treasure_completed_target(image) is None:
+        print("已检查联盟宝藏；自身宠物暂无可寻宝或已完成提示，跳过派遣", flush=True)
+        return leave_treasure(serial, help_template, nav_template, templates)
     if treasure_completed_target(image) is not None:
         for _ in range(3):
             image = claim_treasure(serial, image)
@@ -2714,64 +3057,100 @@ def run_treasure(serial, help_template, nav_template, drawer_template):
         if remaining is None:
             raise RuntimeError("领取寻宝奖励后未识别今日剩余次数")
     if remaining > 0:
-        for attempt in range(5):
-            target = treasure_chest_target(image)
-            if target is not None:
-                break
-            if attempt < 4:
-                image = task_screen(serial)
-        else:
-            raise RuntimeError("宠物寻宝页面未找到宝箱图标")
-        task_tap(serial, *target)
-        for label in ("寻宝派遣", "开始寻宝"):
+        rejected = []
+        for candidate in range(6):
+            for attempt in range(5):
+                target = (treasure_chest_target(image, rejected) if rejected
+                          else treasure_chest_target(image))
+                if target is not None:
+                    break
+                if attempt < 4:
+                    image = task_screen(serial)
+            else:
+                if rejected:
+                    print("当前没有其他符合宠物实力条件的藏宝点，稍后重新检查", flush=True)
+                    return leave_treasure(serial, help_template, nav_template, templates)
+                raise RuntimeError("宠物寻宝页面未找到宝箱图标")
+            image, notice = dispatch_treasure(serial, target)
+            if notice == "stamina":
+                return leave_treasure(serial, help_template, nav_template, templates)
+            if notice == "unavailable":
+                rejected.append(target)
+                continue
             for _ in range(5):
                 image = task_screen(serial)
                 if stamina_refill_target(image) is not None:
                     leave_treasure_stamina(serial, image)
                     return leave_treasure(serial, help_template, nav_template, templates)
-                target = intelligence_text_target(image, (label,), (300, 1700, 780, 1940))
-                if target is not None:
+                after = treasure_remaining(image)
+                if after is not None and after < remaining:
                     break
+                if intelligence_text_target(image, ("寻宝中",), (350, 680, 730, 810)):
+                    task_tap(serial, 960, 680)
             else:
-                raise RuntimeError(f"宠物寻宝未确认{label}按钮")
-            task_tap(serial, *target)
-        for _ in range(5):
-            image = task_screen(serial)
-            if stamina_refill_target(image) is not None:
-                leave_treasure_stamina(serial, image)
-                return leave_treasure(serial, help_template, nav_template, templates)
-            after = treasure_remaining(image)
-            if after is not None and after < remaining:
-                break
-            if intelligence_text_target(image, ("寻宝中",), (350, 680, 730, 810)):
-                task_tap(serial, 960, 680)
+                raise RuntimeError("开始寻宝后未确认今日剩余次数减少")
+            print(f"已开始宠物寻宝，今日剩余次数 {remaining} → {after}", flush=True)
+            break
         else:
-            raise RuntimeError("开始寻宝后未确认今日剩余次数减少")
-        print(f"已开始宠物寻宝，今日剩余次数 {remaining} → {after}", flush=True)
+            print("已检查六个藏宝点，当前均无可派遣宠物，稍后重新检查", flush=True)
     else:
         print("今日剩余寻宝次数为 0，跳过派遣", flush=True)
     return leave_treasure(serial, help_template, nav_template, templates)
 
 
-def island_page(image, template):
+def island_page(image, template, *, use_ocr=True):
     # Only match title lettering: the island scenery behind it changes with camera position.
     crop = image.crop((120, 140, 310, 230)).convert("L")
-    if difference(crop, template) <= 10:
+    if (difference(crop, template) <= 10
+            or difference(white_mask(crop), white_mask(template)) <= 10):
         return True
+    if not use_ocr:
+        return False
     return any("我的海岛" in text.replace(" ", "")
                for text, _ in recognize_text(image.crop((100, 140, 370, 235))))
 
 
 def crystal_target(image, template, near=None):
+    scene = scene_view(image)
+    if scene is not None:
+        unwarped, to_logical, from_logical = scene
+        target = crystal_target(unwarped, template, near=from_logical(*near) if near else None)
+        return to_logical(*target) if target is not None else None
     tutorial = open_template(ROOT / "assets/emulator-crystal-claim-tutorial.png").convert("RGB")
+    nox_tutorial = open_template(ROOT / "assets/emulator-crystal-claim-nox-tutorial.png").convert("RGB")
     best = None
-    for candidate, limit in ((template, .82), (tutorial, .88)):
+    for candidate, limit in ((template, .82), (tutorial, .88), (nox_tutorial, .90)):
         x_range = range(80, 941, 8) if near is None else range(max(0, near[0] - 80), near[0] + 40, 4)
         y_range = range(300, 1901, 8) if near is None else range(max(0, near[1] - 80), near[1] + 40, 4)
-        score, x, y = find_green(image, candidate, x_range, y_range)
+        # Ponds and foliage can match the small green silhouette after a claim.
+        # Require the sampled icon colours/white backing as well; otherwise a
+        # successful collection keeps clicking unrelated island decorations.
+        reference = candidate.convert("RGB")
+        colour_limit = 30 if candidate is nox_tutorial else 55
+        def matches_colours(x, y):
+            crop = image.crop((x, y, x + candidate.width, y + candidate.height)).convert("RGB")
+            channels = ImageStat.Stat(ImageChops.difference(crop, reference)).mean
+            return sum(channels) / len(channels) <= colour_limit
+        score, x, y = matched_mask(image, candidate, x_range, y_range, green_mask,
+                                   minimum_score=limit, candidate_filter=matches_colours)
         if score >= limit and (best is None or score > best[0]):
             best = (score, x + candidate.width // 2, y + candidate.height // 2)
     return best[1:] if best else None
+
+
+def selected_tree_collect_target(image):
+    """The small Nox account's tutorial selects the tree and exposes its action menu."""
+    pixels = image.crop((760, 1340, 850, 1430)).convert("RGB")
+    colours = list(pixels.getdata())
+    if sum(b > r + 50 and b > g + 15 for r, g, b in colours) < len(colours) * .2:
+        return None
+    if not any("生命之树" in text.replace(" ", "") for text, _ in
+               recognize_text(image.crop((300, 850, 750, 1050)))):
+        return None
+    for text, (x, y, width, height) in recognize_text(image.crop((700, 1320, 1000, 1610))):
+        if text.replace(" ", "") == "收集":
+            return round(700 + x + width / 2), round(1320 + y - 65)
+    return None
 
 
 def collect_crystals(serial, image, island_template):
@@ -2782,7 +3161,7 @@ def collect_crystals(serial, image, island_template):
         empty_frames = 0
         for attempt in range(8):
             if island_page(image, island_template):
-                target = crystal_target(image, template)
+                target = crystal_target(image, template) or selected_tree_collect_target(image)
                 if target is not None:
                     break
                 empty_frames += 1
@@ -2807,7 +3186,8 @@ def collect_crystals(serial, image, island_template):
                 if not island_page(image, island_template):
                     absent_frames = 0
                     continue
-                remaining_target = crystal_target(image, template, near=target)
+                remaining_target = (crystal_target(image, template, near=target)
+                                    or selected_tree_collect_target(image))
                 if remaining_target is None:
                     absent_frames += 1
                 else:
@@ -2899,6 +3279,14 @@ def parse_tree_amount(text):
 
 def warehouse_position(image):
     """Locate the facade, which remains visible under both reward icons and timers."""
+    scene = scene_view(image)
+    if scene is not None:
+        unwarped, to_logical, _ = scene
+        offset = warehouse_position(unwarped)
+        if offset is None:
+            return None
+        x, y = to_logical(260 + offset[0], 1330 + offset[1])
+        return x - 260, y - 1330
     template = open_template(ROOT / "assets/emulator-warehouse-front.png").convert("L")
     gray = image.convert("L")
     small = gray.resize((270, 585))
@@ -2932,6 +3320,25 @@ def warehouse_position(image):
                       for yy in range(y - 2, y + 3) for xx in range(x - 2, x + 3))
     if score >= .78:
         return x - 260, y - 1330
+    # Upgrading adds scaffolding across the facade. The distinctive roof vent
+    # stays exposed; use its calibrated position with a stricter correlation.
+    import cv2
+    import numpy as np
+    vent = open_template(ROOT / "assets/emulator-warehouse-roof-vent.png").convert("L")
+    pixels = np.asarray(gray.crop((40, 350, 1040, 2050)))
+    scores = cv2.matchTemplate(pixels, np.asarray(vent), cv2.TM_CCOEFF_NORMED)
+    _, score, _, (x, y) = cv2.minMaxLoc(scores)
+    if score >= .85:
+        return x + 40 - 525, y + 350 - 1246
+    # Camera zoom changes the building and bubble together; keep using the
+    # real Nox vent while checking the nearby rendered scale explicitly.
+    for factor in (.9, 1.1):
+        scaled = vent.resize((round(vent.width * factor), round(vent.height * factor)), Image.Resampling.LANCZOS)
+        scores = cv2.matchTemplate(pixels, np.asarray(scaled), cv2.TM_CCOEFF_NORMED)
+        _, score, _, (x, y) = cv2.minMaxLoc(scores)
+        if score >= .9:
+            return (round(x + 40 - (525 - 260) * factor - 260),
+                    round(y + 350 - (1246 - 1330) * factor - 1330))
     return None
 
 
@@ -3001,7 +3408,7 @@ def warehouse_countdown(image, known_warehouse=False, offset=None):
 
 def warehouse_reward_timer(image):
     lines = [text.replace(" ", "") for text, _ in
-             recognize_text(image.crop((330, 1850, 800, 2020)))]
+             recognize_text(image.crop((330, 1850, 800, 2180)))]
     if not any("距离下个包裹" in text for text in lines):
         return False, None
     values = [parse_countdown(text) for text in lines]
@@ -3029,7 +3436,10 @@ def labelled_countdown(image, box, labels):
 
 def stamina_page(image):
     with open_template(ROOT / "assets/emulator-can-modal-title.png") as title:
-        return difference(image.crop((390, 1390, 690, 1480)).convert("L"), title.convert("L")) <= 15
+        if difference(image.crop((390, 1390, 690, 1480)).convert("L"), title.convert("L")) <= 15:
+            return True
+    return hunting.button_target(sys.modules[__name__], image, ("丰盛的招待",),
+                                 (340, 1280, 760, 1540)) is not None
 
 
 def stamina_countdown(image):
@@ -3043,6 +3453,14 @@ def stamina_countdown(image):
 
 
 def stamina_target(image, offset=None):
+    scene = scene_view(image)
+    if scene is not None:
+        unwarped, to_logical, from_logical = scene
+        if offset is not None:
+            x, y = from_logical(260 + offset[0], 1330 + offset[1])
+            offset = x - 260, y - 1330
+        target = stamina_target(unwarped, offset)
+        return to_logical(*target) if target is not None else None
     template = open_template(ROOT / "assets/emulator-can-icon.png").convert("L")
     if offset is None:
         x_range = range(0, image.width - template.width + 1, 10)
@@ -3054,6 +3472,20 @@ def stamina_target(image, offset=None):
     if (score >= .85 and difference(image.crop((x, y, x + template.width, y + template.height)).convert("L"),
                                    template) < 35):
         return x + template.width // 2, y + template.height // 2
+    import cv2
+    import numpy as np
+    # Some historical city views were zoomed ten percent closer. Match that
+    # render size without weakening the confidence or adding non-Nox assets.
+    scaled = template.resize((round(template.width * 1.1), round(template.height * 1.1)), Image.Resampling.LANCZOS)
+    left, top = max(0, min(x_range)), max(0, min(y_range))
+    right = min(image.width, max(x_range) + scaled.width + 1)
+    bottom = min(image.height, max(y_range) + scaled.height + 1)
+    region = np.asarray(image.crop((left, top, right, bottom)).convert("L"))
+    if region.shape[0] >= scaled.height and region.shape[1] >= scaled.width:
+        scores = cv2.matchTemplate(region, np.asarray(scaled), cv2.TM_CCOEFF_NORMED)
+        _, confidence, _, (x, y) = cv2.minMaxLoc(scores)
+        if confidence >= .93:
+            return left + x + scaled.width // 2, top + y + scaled.height // 2
     return None
 
 
@@ -3230,6 +3662,17 @@ def _run_stamina(serial, help_template, nav_template, drawer_template, timers=No
     return image
 
 
+def dawn_claim_page(image):
+    title = open_template(ROOT / "assets/emulator-dawn-title.png").convert("L")
+    crop = image.crop((405, 520, 660, 630)).convert("L")
+    button = open_template(ROOT / "assets/emulator-dawn-button.png").convert("L")
+    # The translucent title background changes with the city behind the panel.
+    title_matches = (difference(crop, title) <= 15
+                     or difference(white_mask(crop), white_mask(title)) <= 10)
+    return title_matches and difference(
+        image.crop((360, 1580, 730, 1730)).convert("L"), button) <= 20
+
+
 def run_rewards(serial, help_template, nav_template, drawer_template,
                 warehouse_template, tree_template, island_template, initial_image=None,
                 warehouse=True, tree=True, dawn=True, tree_threshold=1000, timers=None, keep_open=False):
@@ -3324,6 +3767,7 @@ def run_rewards(serial, help_template, nav_template, drawer_template,
         else:
             raise RuntimeError("进入生命之树后等待 8 次截图仍未确认海岛页面，已停止")
         image = collect_crystals(serial, image, island_template)
+        image = island_help.run(sys.modules[__name__], serial, image, island_template)
         task_tap(serial, 60, 190)
         image = wait_city_after_island(serial, help_template, nav_template)
         image, drawer_visible = bottom_drawer(image, "tree")
@@ -3352,12 +3796,7 @@ def run_rewards(serial, help_template, nav_template, drawer_template,
     if dawn and score >= 0.85 and training_status(image, dawn_y + 50) == "completed":
         task_tap(serial, 608, dawn_y + 50)
         image = task_screen(serial)
-        title_box = (405, 520, 660, 630)
-        title = open_template(ROOT / "assets/emulator-dawn-title.png").convert("L")
-        button_box = (360, 1580, 730, 1730)
-        button = open_template(ROOT / "assets/emulator-dawn-button.png").convert("L")
-        if (difference(image.crop(title_box).convert("L"), title) > 15
-                or difference(image.crop(button_box).convert("L"), button) > 20):
+        if not dawn_claim_page(image):
             raise RuntimeError("未确认晨曦回礼领取页面，已停止")
         task_tap(serial, 530, 1650)
         image = task_screen(serial)
@@ -3604,7 +4043,11 @@ def recover_task_city(serial, help_template, nav_template, text_template, reconn
                     if task_page(image, {"drawer-open": drawer}, "drawer-open") else image)
         if forced_offline(image.convert("L"), text_template, reconnect_template):
             raise RuntimeError("重试前检测到强制下线")
-        if (target := social_back_target(image)) is not None:
+        if island_page(image, island, use_ocr=False):
+            target = (60, 190)
+        elif (target := treasure_dispatch_close(image)) is not None:
+            pass
+        elif (target := social_back_target(image)) is not None:
             pass
         elif intelligence_page(image):
             target = (60, 190)
@@ -3665,6 +4108,7 @@ class ConsecutiveTaskFailures(RuntimeError):
 
 
 def retry_once(label, operation, serial, text_template, reconnect_template, recover=None, on_retry=None):
+    from gui_web import StartupGuideBlocked
     for attempt in range(4):
         check_stop()
         try:
@@ -3676,6 +4120,10 @@ def retry_once(label, operation, serial, text_template, reconnect_template, reco
                 else:
                     print(f"{label} 第 {attempt} 次重试：开始重试", flush=True)
             return operation()
+        except StartupGuideBlocked:
+            # A mandatory guide cannot be recovered by ordinary city taps.
+            # Preserve settings and stop the affected runtime immediately.
+            raise
         except Exception as error:
             stage = "首次异常" if not attempt else f"第 {attempt} 次重试异常"
             # Confirmed forced-offline dialogs retain the existing reconnect policy.
@@ -3690,8 +4138,8 @@ def retry_once(label, operation, serial, text_template, reconnect_template, reco
             if attempt == 3:
                 diagnostic = save_task_failure(serial, label, "retry-3")
                 error.diagnostic_screenshot = diagnostic
-                print(f"⚠️ {label} {stage}：{error}；连续3次重试失败；{diagnostic}", flush=True)
-                exhausted = RetriesExhausted(f"{label} 重试失败：{error}")
+                # The caller reports the final outcome (stop or skip) once.
+                exhausted = RetriesExhausted(f"{label} 重试失败：{error}；连续3次重试失败")
                 exhausted.diagnostic_screenshot = diagnostic
                 raise exhausted from error
             retry = attempt + 1
@@ -3719,7 +4167,7 @@ def save_task_failure(serial, label, attempt, context=None):
                 / f"{captured_at:%Y-%m-%d}"
                 / f"{prefix}-{captured_at:%Y%m%d-%H%M%S-%f}.png").resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        image.save(path)
+        image.info.get("native_frame", image).save(path)
     except Exception as exc:
         # Diagnostics must never mask an ADB, image-decoding or task exception.
         return f"失败截图保存失败：{type(exc).__name__}: {exc}"
@@ -3769,6 +4217,14 @@ def run_help_clicker(serial, help_template, nav_template, text_template, reconne
         reconnect_template, reconnect=reconnect, dry_run=dry_run)
 
 
+def run_bear(serial, help_template, nav_template, text_template, reconnect_template,
+             modes=("follow",), reconnect=True, dry_run=False, forever=True, seconds=120, interval=2):
+    return bear_hunting.run(
+        sys.modules[__name__], serial, help_template, nav_template, text_template,
+        reconnect_template, modes=modes, reconnect=reconnect, dry_run=dry_run,
+        forever=forever, seconds=seconds, interval=interval)
+
+
 def main():
     global CHAT_TEMPLATE, RECONNECT_DELAY, RECONNECT_PROMO_CLOSE, RECONNECT_WELCOME_CLOSE
     global ACTIVITY_CLOSE, TOWN_TEMPLATE, WILDERNESS_HEALING
@@ -3779,6 +4235,9 @@ def main():
     parser.add_argument("--control", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--help-clicker", action="store_true",
                         help="小号模式：仅进入联盟互助并持续快速点击全部帮助区域，其他任务全部跳过")
+    parser.add_argument("--bear", action="store_true", help="仅执行自动打熊，其他任务全部跳过")
+    parser.add_argument("--bear-modes", nargs="+", choices=("drive", "follow", "follow_no_heroes"), default=("follow_no_heroes",),
+                        help="打熊方式：drive 主动开车，follow 自动跟车，follow_no_heroes 无英雄跟车，可同时选择")
     parser.add_argument("--city-tasks", action="store_true", help="另执行模拟器联盟科技捐献和免费招募")
     parser.add_argument("--train", action="store_true", help="另领取完成的士兵并启动空闲兵营的普通资源训练")
     parser.add_argument("--upgrade", action="store_true", help="自动练兵时优先晋升低级兵种至当前最高等级")
@@ -3788,7 +4247,7 @@ def main():
                               ("train", "练兵"),
                               ("shield", "盾兵训练"),
                               ("spear", "矛兵训练"), ("archer", "射手训练"),
-                              ("donate", "联盟捐献"), ("recruit", "免费招募"),
+                              ("donate", "联盟捐献"), ("alliance_chests", "联盟宝箱"), ("recruit", "免费招募"),
                               ("treasure", "宠物寻宝"),
                               ("warehouse", "仓库补给"), ("tree", "生命结晶"),
                               ("dawn", "晨曦回礼"), ("pet", "宠物技能"), ("task_rewards", "任务奖励"),
@@ -3803,7 +4262,11 @@ def main():
     for kind, (label, maximum) in hunting.MONSTERS.items():
         parser.add_argument(f"--{kind.replace('_', '-')}-level", type=int, choices=range(hunting.MINIMUM_LEVELS[kind], maximum + 1),
                             default=1 if kind == "beast" else 2, help=f"{label}挑战等级")
-    parser.add_argument("--gather", action="store_true", help="灯塔情报后执行资源采集；关闭情报时直接采集")
+    parser.add_argument("--gather", action="store_true", help="启动时执行资源采集，采集队伍返回后按配置顺序重新采集")
+    parser.add_argument("--no-gather-full-only", action="store_true",
+                        help="采集搜索时取消仅搜索资源为满的资源点，默认勾选")
+    parser.add_argument("--gather-steps", nargs="+", type=parse_gather_step,
+                        help="按顺序采集，例如 wood:7 iron:8，允许重复资源，最多六项")
     parser.add_argument("--resources", nargs="+", choices=tuple(GATHER_RESOURCES),
                         default=tuple(GATHER_RESOURCES), help="采集资源，默认 meat wood coal iron")
     for resource, label in GATHER_RESOURCES.items():
@@ -3819,6 +4282,8 @@ def main():
     parser.add_argument("--max-clicks", type=int, default=10, help="本次最多点击次数")
     parser.add_argument("--dry-run", action="store_true", help="仅识别，不点击")
     args = parser.parse_args()
+    if args.bear and args.help_clicker:
+        parser.error("自动打熊与互助连点不能同时开启")
     if (args.duration <= 0 or args.max_clicks <= 0 or not math.isfinite(args.interval)
             or not math.isfinite(args.reconnect_minutes) or args.interval <= 0 or args.reconnect_minutes <= 0):
         parser.error("时长、间隔、点击上限和重连分钟数都必须大于零")
@@ -3850,28 +4315,32 @@ def main():
         help_template = open_template(ROOT / "assets/emulator-help-icon.png").convert("L")
         nav_template = open_template(ROOT / "assets/emulator-city-nav.png").convert("L")
         WILDERNESS_HEALING = ((help_template, nav_template)
-                              if args.heal and not args.dry_run and not args.help_clicker else None)
+                              if args.heal and not args.dry_run and not (args.help_clicker or args.bear) else None)
         text_template = open_template(ROOT / "assets/emulator-forced-text.png").convert("L")
         reconnect_template = open_template(ROOT / "assets/emulator-reconnect.png").convert("L")
         task_templates = ({name: open_template(ROOT / f"assets/emulator-{name}.png").convert("RGB")
                            for name in (*TASK_BOXES, "donate-label", "free-label", "thumb")}
-                          if (args.city_tasks or args.daily_tasks) and not args.help_clicker else None)
+                          if (args.city_tasks or args.daily_tasks) and not (args.help_clicker or args.bear) else None)
         train_titles = {unit: open_template(ROOT / f"assets/emulator-training-{unit}-title.png").convert("L")
-                        for unit, _ in TRAIN_ROWS} if (args.train or args.daily_tasks) and not args.help_clicker else None
+                        for unit, _ in TRAIN_ROWS} if (args.train or args.daily_tasks) and not (args.help_clicker or args.bear) else None
         if args.self_test:
             self_test(help_template, nav_template, text_template, reconnect_template)
         else:
             serial = args.device or retry_once("查找设备", connected_device, None,
                                                text_template, reconnect_template)
             bind_console_emulator(avd_key(serial))
-            if not emulator_device(serial):
-                raise RuntimeError("所选 ADB 设备不是模拟器")
+            if adb(serial, "get-state").strip() != b"device":
+                raise RuntimeError("所选安卓设备未连接或未授权，请检查 USB 调试并刷新设备列表")
             if not args.dry_run:
                 identity = avd_key(serial)
                 lease = DeviceLease(serial, identity).acquire()
                 import stamina_state
                 stamina_state.set_device_identity(serial, identity)
-            if args.help_clicker:
+            if args.bear:
+                run_bear(serial, help_template, nav_template, text_template,
+                         reconnect_template, modes=args.bear_modes, reconnect=not args.no_reconnect,
+                         dry_run=args.dry_run, forever=args.forever, seconds=args.duration, interval=args.interval)
+            elif args.help_clicker:
                 run_help_clicker(serial, help_template, nav_template, text_template,
                                  reconnect_template, reconnect=not args.no_reconnect,
                                  dry_run=args.dry_run)
@@ -3906,7 +4375,12 @@ def main():
                 if args.daily_tasks or args.city_tasks:
                     if not args.no_donate:
                         tasks["donate"] = lambda: run_city_tasks(serial, help_template, nav_template,
-                                                                  task_templates, recruit=False, keep_open=True)
+                                                                  task_templates, recruit=False, keep_open=True,
+                                                                  timers=timers,
+                                                                  collect_alliance_chests=args.daily_tasks and not args.no_alliance_chests)
+                    if args.daily_tasks and not args.no_alliance_chests:
+                        tasks['alliance_chests'] = lambda: alliance_chests.run(
+                            sys.modules[__name__], serial, help_template, nav_template, timers=timers)
                     if not args.no_recruit:
                         for kind in RECRUIT_TYPES:
                             tasks[kind] = lambda kind=kind: run_city_tasks(
@@ -3946,8 +4420,11 @@ def main():
                         serial, help_template, nav_template, monsters=args.monsters,
                         levels={kind: getattr(args, f"{kind}_level") for kind in args.monsters}, timers=timers)
                 if args.gather:
-                    tasks["gather"] = lambda: run_gather(
-                        serial, help_template, nav_template, text_template, reconnect_template,
+                    tasks["gather"] = GatherTask(
+                        sys.modules[__name__], serial,
+                        (help_template, nav_template, text_template, reconnect_template),
+                        **({"steps": args.gather_steps} if args.gather_steps is not None else {}),
+                        full_only=not args.no_gather_full_only,
                         resources=args.resources,
                         levels={resource: getattr(args, f"{resource}_level") for resource in args.resources})
                 if args.heal:

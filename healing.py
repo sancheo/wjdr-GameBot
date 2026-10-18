@@ -14,9 +14,34 @@ def button(bot, image, name, offset):
     dx, dy = offset
     origins = {"quick": (150, 1640), "treat": (730, 1640), "help": (675, 1665)}
     x, y = origins[name]
-    template = bot.open_template(bot.ROOT / f"assets/emulator-heal-{name}.png")
-    score, _, _ = bot.find_white(image, template, [x + dx], [y + dy])
-    return score >= .92
+    # Pixel_5 and Pixel_5_2 rasterize these labels differently. Use real
+    # samples for both while retaining the original confidence threshold.
+    for suffix in ("", "-pixel5"):
+        template = bot.open_template(bot.ROOT / f"assets/emulator-heal-{name}{suffix}.png")
+        score, _, _ = bot.find_white(image, template, [x + dx], [y + dy])
+        if score >= .92:
+            return True
+    return False
+
+
+def treatment_ready(bot, image, offset):
+    if not button(bot, image, "treat", offset):
+        return False
+    dx, dy = offset
+    # The label is also present on the disabled zero-unit button. Confirm its
+    # blue background before spending resources, away from the text and clock.
+    pixels = image.convert("RGB").crop((650 + dx, 1660 + dy, 685 + dx, 1690 + dy))
+    blue = sum(b > r + 50 and g > r + 25 for r, g, b in pixels.getdata())
+    return blue >= pixels.width * pixels.height * .8
+
+
+def in_progress(bot, image, offset):
+    dx, dy = offset
+    for suffix in ("", "-pixel5"):
+        template = bot.open_template(bot.ROOT / f"assets/emulator-heal-progress{suffix}.png")
+        if bot.find_white(image, template, [190 + dx], [1545 + dy])[0] >= .92:
+            return True
+    return False
 
 
 def entry(bot, image, help_template, nav_template):
@@ -46,13 +71,27 @@ def run(bot, serial, help_template, nav_template, initial_image=None):
         else:
             raise RuntimeError("点击伤兵图标后未确认治疗伤兵弹窗")
 
+    for attempt in range(8):
+        if offset is not None and (button(bot, image, "quick", offset)
+                                   or button(bot, image, "help", offset)
+                                   or in_progress(bot, image, offset)):
+            break
+        if attempt < 7:
+            image = bot.task_screen(serial, help_enabled=False)
+            offset = page(bot, image)
+    else:
+        raise RuntimeError("治疗弹窗未确认快速选择、联盟互助或治疗中状态")
+
     dx, dy = offset
     if button(bot, image, "quick", offset):
         bot.task_tap(serial, 200 + dx, 1695 + dy)
-        image = bot.task_screen(serial, help_enabled=False)
-        offset = page(bot, image)
-        if offset is None or not button(bot, image, "treat", offset):
-            raise RuntimeError("快速选择后未确认普通资源治疗按钮")
+        for _ in range(8):
+            image = bot.task_screen(serial, help_enabled=False)
+            offset = page(bot, image)
+            if offset is not None and treatment_ready(bot, image, offset):
+                break
+        else:
+            raise RuntimeError("快速选择后未确认已选中伤兵及可用的普通资源治疗按钮")
         dx, dy = offset
         bot.task_tap(serial, 775 + dx, 1695 + dy)
         for _ in range(8):

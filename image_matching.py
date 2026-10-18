@@ -40,7 +40,8 @@ def minimum_difference(image, template, box, x_offsets, y_offsets):
     return best
 
 
-def find_mask(image, template, x_range, y_range, mask_function):
+def find_mask(image, template, x_range, y_range, mask_function, *,
+              minimum_score=0, candidate_filter=None):
     xs, ys = list(x_range), list(y_range)
     if not xs or not ys:
         return 0, 0, 0
@@ -56,6 +57,16 @@ def find_mask(image, template, x_range, y_range, mask_function):
               - integral[height:, :-width] + integral[:-height, :-width])
     denominator = counts + float(target.sum())
     scores = np.divide(2 * common, denominator, out=np.zeros_like(common), where=denominator != 0)
+    if candidate_filter is not None:
+        # Validate all qualifying native-kernel matches, rather than dropping a
+        # real icon when an unrelated silhouette has a slightly higher score.
+        rows, columns = np.nonzero(scores >= minimum_score)
+        order = np.argsort(scores[rows, columns])[::-1]
+        for index in order:
+            x, y = int(columns[index]) + left, int(rows[index]) + top
+            if x >= 0 and y >= 0 and candidate_filter(x, y):
+                return float(scores[rows[index], columns[index]]), x, y
+        return 0, 0, 0
     coarse = scores[np.asarray(ys)[:, None] - top, np.asarray(xs)[None, :] - left]
     y_index, x_index = np.unravel_index(int(np.argmax(coarse)), coarse.shape)
     best = float(coarse[y_index, x_index]), xs[x_index], ys[y_index]

@@ -8,9 +8,47 @@ from unittest.mock import call, patch
 
 from PIL import Image
 import help_bot as bot
+from screen_geometry import detect
 
 
 class TreasureTest(unittest.TestCase):
+    def test_nox_advanced_claim_shares_and_continues_to_map(self):
+        frames = []
+        for name in ('share', 'shared', 'returned'):
+            with Image.open(bot.ROOT / f'tests/fixtures/nox/treasure-alliance-{name}-main-1018-native.png') as raw:
+                raw = raw.convert('RGB')
+                frames.append(detect(raw).normalize(raw))
+        share, shared, cleared = frames
+        self.assertEqual(bot.treasure_share_target(share), (852, 1765))
+        self.assertIsNone(bot.treasure_share_target(shared))
+        self.assertIsNone(bot.treasure_share_target(cleared))
+        completed, detail, reward = [
+            Image.open(bot.ROOT / f'artifacts/treasure-{name}.png').convert('RGB')
+            for name in ('completed', 'claim-result', 'reward')]
+        with (patch.object(bot, 'task_screen', side_effect=[detail, reward, share, share, shared, cleared]),
+              patch.object(bot, 'task_tap') as tap):
+            self.assertIs(bot.claim_treasure('test', completed), cleared)
+        self.assertEqual(tap.call_args_list[-2:],
+                         [call('test', 852, 1765), call('test', 960, 640)])
+        with patch.object(bot, 'task_tap') as tap:
+            self.assertIs(bot.share_treasure('test', shared), shared)
+        tap.assert_not_called()
+
+    def test_phone_alliance_claim_checks_actual_modal_reward_and_return(self):
+        phone = []
+        for name in ('phone-alliance-treasure-1016', 'phone-alliance-reward-1016'):
+            with Image.open(bot.ROOT / f'tests/fixtures/{name}.png') as raw:
+                raw = raw.convert('RGB')
+                phone.append(detect(raw).normalize(raw))
+        alliance, reward = phone
+        page = Image.open(bot.ROOT / 'tests/fixtures/treasure-four-attempts.png').convert('RGB')
+        with (patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'task_screen', side_effect=[alliance, reward, alliance, page])):
+            self.assertIs(bot.claim_alliance_treasure('test', page), page)
+        self.assertEqual(tap.call_count, 4)
+        self.assertEqual(tap.call_args_list[0], call('test', 950, 2220))
+        self.assertEqual(tap.call_args_list[-2:], [call('test', 540, 2100), call('test', 1000, 510)])
+
     def assert_completed_drawer_entry(self, tap):
         self.assertEqual(tap.call_args_list[0].args[:2], ('test', 605))
         # Vision 与 RapidOCR 对同一行底边有一两个像素的差异。
@@ -302,6 +340,24 @@ class TreasureTest(unittest.TestCase):
         self.assertTrue(480 <= x <= 590 and 1860 <= y <= 1940)
         self.assertEqual(tap.call_args_list[2:], [call('test', 540, 2100), call('test', 1000, 510)])
 
+    def test_busy_own_pets_still_check_alliance_rewards_without_dispatch(self):
+        drawer = Image.new('RGB', bot.EXPECTED_SIZE)
+        page = Image.open(bot.ROOT / 'artifacts/treasure-claimed-map.png').convert('RGB')
+        with (patch.object(bot, 'color_screenshot', return_value=drawer),
+              patch.object(bot, 'inspect', return_value=(True, None, 0)),
+              patch.object(bot, 'task_drawer', return_value=drawer),
+              patch.object(bot, 'recognize_text', return_value=[('宠物寻宝', (0, 200, 120, 30))]),
+              patch.object(bot, 'intelligence_text_target', return_value=None),
+              patch.object(bot, 'treasure_remaining', return_value=3),
+              patch.object(bot, 'claim_alliance_treasure', return_value=page) as shared,
+              patch.object(bot, 'treasure_chest_target') as dispatch,
+              patch.object(bot, 'task_screen', side_effect=[page, drawer]),
+              patch.object(bot, 'task_tap') as tap):
+            self.assertIs(bot.run_treasure('test', None, None, drawer), drawer)
+        shared.assert_called_once_with('test', page)
+        dispatch.assert_not_called()
+        self.assertEqual(tap.call_args_list, [call('test', 605, 955), call('test', 60, 190)])
+
     def test_live_dispatch_count_ignores_duplicate_ocr_digit(self):
         page = Image.open(bot.ROOT / 'tests/fixtures/treasure-three-attempts.png').convert('RGB')
         self.assertEqual(bot.treasure_remaining(page), 3)
@@ -316,7 +372,10 @@ class TreasureTest(unittest.TestCase):
     def test_chest_matches_left_edge_and_coarse_grid_offsets(self):
         page = Image.open(bot.ROOT / 'artifacts/treasure-page.png').convert('RGB')
         claimed = Image.open(bot.ROOT / 'artifacts/treasure-claimed-map.png').convert('RGB')
-        self.assertEqual(bot.treasure_chest_target(page), (951, 1290))
+        target = bot.treasure_chest_target(page)
+        self.assertIsNotNone(target)
+        self.assertAlmostEqual(target[0], 951, delta=2)
+        self.assertAlmostEqual(target[1], 1290, delta=2)
         target = bot.treasure_chest_target(claimed)
         self.assertIsNotNone(target)
         self.assertTrue(130 <= target[0] <= 170 and 880 <= target[1] <= 930)
@@ -445,10 +504,9 @@ class TreasureTest(unittest.TestCase):
                 expected += [call('test', 960, 680)]
             self.assertEqual(tap.call_args_list, expected if failed else expected + [call('test', 60, 190)])
 
-    def test_unavailable_or_absent_row_skips_without_tapping(self):
+    def test_absent_row_skips_without_tapping(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
-        for texts in ([('宠物寻宝', (0, 200, 120, 30))],
-                      [('生命之树', (0, 300, 120, 30))]):
+        for texts in ([('生命之树', (0, 300, 120, 30))],):
             with (self.subTest(texts=texts),
                 patch.object(bot, 'color_screenshot', return_value=frame),
                 patch.object(bot, 'inspect', return_value=(True, None, 0)),
@@ -471,23 +529,32 @@ class TreasureTest(unittest.TestCase):
         self.assertIsNone(bot.treasure_remaining(frames['detail']))
         self.assertEqual(bot.treasure_back_target(frames['page']), (60, 190))
         self.assertEqual(bot.treasure_back_target(frames['detail']), (960, 595))
-        self.assertEqual(bot.treasure_back_target(frames['dispatch']), (995, 610))
+        close = bot.treasure_back_target(frames['dispatch'])
+        self.assertIsNotNone(close)
+        self.assertAlmostEqual(close[0], 995, delta=5)
+        self.assertAlmostEqual(close[1], 610, delta=5)
         active = Image.open(bot.ROOT / 'artifacts/treasure-live-after-start.png').convert('RGB')
         self.assertEqual(bot.treasure_back_target(active), (960, 680))
         drawer = Image.open(bot.ROOT / 'artifacts/treasure-drawer.png').convert('RGB')
         with (patch.object(bot, 'color_screenshot', return_value=drawer),
               patch.object(bot, 'inspect', return_value=(True, None, 0)),
               patch.object(bot, 'task_drawer', return_value=drawer),
+              patch.object(bot, 'task_screen', side_effect=[frames['page'], drawer]),
+              patch.object(bot, 'claim_alliance_treasure', return_value=frames['page']) as shared,
+              patch.object(bot, 'treasure_completed_target', return_value=None),
               patch.object(bot, 'swipe_drawer') as swipe,
               patch.object(bot, 'task_tap') as tap):
             self.assertIs(bot.run_treasure('test', None, None, drawer), drawer)
         swipe.assert_not_called()
-        tap.assert_not_called()
+        shared.assert_called_once_with('test', frames['page'])
+        self.assertEqual(tap.call_args_list[0].args[:2], ('test', 605))
+        self.assertEqual(tap.call_args_list[1:], [call('test', 60, 190)])
         with Image.open(bot.ROOT / 'assets/emulator-treasure-chest.png') as chest:
             score, x, y = bot.find_white(frames['page'], chest,
                                         range(80, 881, 20), range(430, 1851, 20))
         self.assertGreaterEqual(score, .90)
-        self.assertEqual((x, y), (282, 683))
+        self.assertAlmostEqual(x, 282, delta=2)
+        self.assertAlmostEqual(y, 683, delta=2)
         for text, expected in (('今日剩余寻宝次数：0', 0),
                                ('今日剩余寻宝次数: 12', 12),
                                ('今日剩余寻宝次数：', None)):

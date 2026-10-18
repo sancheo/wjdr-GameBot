@@ -2,6 +2,8 @@
 
 import re
 
+from PIL import Image
+
 ENTRY_BOX = (15, 1985, 95, 2040)
 ENTRY_BADGE = (68, 1930, 125, 1988)
 TITLE_BOX = (435, 435, 645, 500)
@@ -16,11 +18,33 @@ def badge_count(bot, image, box, detected_text=None):
         text = text.replace(" ", "")
         if re.fullmatch(r"[0-9]+\+?", text) and int(text.rstrip("+")) > 0:
             return int(text.rstrip("+"))
+    # Small badge digits can disappear when OCR sees the whole tab row or
+    # surrounding tab text. Retry only the actual red badge, never infer a count.
+    crop = image.crop(box).convert("RGB")
+    points = [(index % crop.width, index // crop.width)
+              for index, (red, green, blue) in enumerate(crop.getdata())
+              if red > 180 and red > green * 1.45 and red > blue * 1.45]
+    if points:
+        xs, ys = zip(*points)
+        badge = crop.crop((max(0, min(xs) - 3), max(0, min(ys) - 3),
+                           min(crop.width, max(xs) + 4), min(crop.height, max(ys) + 4)))
+        for text, _ in bot.recognize_text(badge):
+            text = text.replace(" ", "")
+            if re.fullmatch(r"[0-9]+\+?", text) and int(text.rstrip("+")) > 0:
+                return int(text.rstrip("+"))
+        # A tightly cropped single "1" can be rejected by the OCR detector.
+        # Add a neutral margin; still require an actual positive digit read.
+        padded = Image.new("RGB", (badge.width + 20, badge.height + 20), "white")
+        padded.paste(badge, (10, 10))
+        for text, _ in bot.recognize_text(padded):
+            text = text.replace(" ", "")
+            if re.fullmatch(r"[0-9]+\+?", text) and int(text.rstrip("+")) > 0:
+                return int(text.rstrip("+"))
     return None
 
 
 def entry(bot, image, help_template, nav_template):
-    if image.size != bot.EXPECTED_SIZE or image.mode != "RGB":
+    if image.mode != "RGB":
         return None
     if not bot.inspect(image.convert("L"), help_template, nav_template,
                        allow_wilderness=True)[0]:

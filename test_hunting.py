@@ -133,7 +133,7 @@ class HuntingTest(unittest.TestCase):
                              {"gather": lambda: events.append("gather"),
                               "hunt": lambda: events.append("hunt"), "intelligence": intelligence},
                              *([None] * 4), timers=timers, help_enabled=False)
-        self.assertEqual(events, ["intelligence", "hunt", "gather"] * 2)
+        self.assertEqual(events, ["intelligence", "hunt", "gather", "intelligence", "hunt"])
 
     def test_hunt_precedes_gather_when_intelligence_disabled(self):
         clock, events = Clock(), []

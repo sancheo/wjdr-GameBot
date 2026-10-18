@@ -20,8 +20,9 @@ def _interrupted(bot, image, text_template, reconnect_template):
 def help_page(bot, image):
     """Identify the page by its heading, without inspecting the help-all button."""
     with bot.open_template(bot.ROOT / "assets/emulator-alliance-help-title.png") as template:
-        return bot.difference(image.crop(HELP_TITLE_BOX).convert("L"),
-                              template.convert("L")) <= 15
+        difference = bot.difference(image.crop(HELP_TITLE_BOX).convert("L"),
+                                    template.convert("L"))
+        return difference <= 15 or (difference <= 35 and bot.header_text(image, "联盟互助"))
 
 
 def _wait_page(bot, serial, predicate, text_template, reconnect_template):
@@ -74,6 +75,11 @@ def run(bot, serial, help_template, nav_template, text_template,
                             reason=reason, next_run=None)
 
     def recover_city():
+        image = bot.screenshot(serial)
+        if (not _interrupted(bot, image, text_template, reconnect_template)
+                and bot.inspect(image.convert("L"), help_template, nav_template,
+                                allow_wilderness=True)[0]):
+            return
         if not bot.return_to_city(serial, help_template, nav_template,
                                   text_template, reconnect_template):
             report("retrying", "强制下线，等待自动重连")

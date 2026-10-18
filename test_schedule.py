@@ -79,7 +79,7 @@ class ScheduleTest(unittest.TestCase):
                              *([None] * 4), help_enabled=False)
         self.assertEqual(calls, ['explore', 'donate', 'donate'])
 
-    def test_every_intelligence_round_triggers_gather_and_city_tasks_return_only_when_due(self):
+    def test_intelligence_does_not_restart_gather_and_city_tasks_return_only_when_due(self):
         clock, timers, events = Clock(), {}, []
         wilderness = Image.new('RGB', bot.EXPECTED_SIZE)
         def intelligence():
@@ -106,9 +106,9 @@ class ScheduleTest(unittest.TestCase):
                              {'train': city, 'intelligence': intelligence, 'gather': gather},
                              *([None] * 4), help_enabled=False, timers=timers)
         self.assertEqual(events, [('city', 100), ('intelligence', 100), ('gather', 100),
-                                  ('intelligence', 110), ('gather', 110),
+                                  ('intelligence', 110),
                                   ('return', 115), ('city', 115),
-                                  ('intelligence', 120), ('gather', 120)])
+                                  ('intelligence', 120)])
 
     def setUp(self):
         state_dir = tempfile.TemporaryDirectory()
@@ -246,16 +246,18 @@ class ScheduleTest(unittest.TestCase):
         tap.assert_called_once_with('test', 60, 190)
 
     def test_startup_order_and_disabled_tasks(self):
-        for disabled in ([], ['pet'], ['treasure'], ['warehouse'], ['task_rewards'],
+        for disabled in ([], ['pet'], ['treasure'], ['warehouse'], ['task_rewards'], ['alliance_chests'],
                          ['train', 'donate', 'warehouse', 'recruit', 'pet', 'treasure']):
             options = ['help_bot.py', '--device', 'emulator-test', '--daily-tasks']
             options += ['--no-' + name.replace('_', '-') for name in disabled]
             with (patch('sys.argv', options), patch.object(bot, 'return_to_city', return_value=True),
+                  patch.object(bot, 'adb', return_value=b'device'),
+                  patch.object(bot, 'avd_key', return_value='serial:emulator-test'),
                   patch.object(bot, 'run_schedule') as schedule):
                 bot.main()
             tasks = schedule.call_args.args[4]
             self.assertEqual(list(tasks), [name for name in
-                ['explore', 'train', 'donate', *bot.RECRUIT_TYPES, 'warehouse', 'stamina', 'treasure', 'tree', 'dawn', *bot.PET_SKILLS, 'task_rewards']
+                ['explore', 'train', 'donate', 'alliance_chests', *bot.RECRUIT_TYPES, 'warehouse', 'stamina', 'treasure', 'tree', 'dawn', *bot.PET_SKILLS, 'task_rewards']
                 if name not in disabled and not (name in bot.RECRUIT_TYPES and 'recruit' in disabled)
                 and not (name in bot.PET_SKILLS and 'pet' in disabled)
                 and not (name == 'stamina' and 'warehouse' in disabled)])
@@ -264,11 +266,16 @@ class ScheduleTest(unittest.TestCase):
                   patch.object(bot, 'run_rewards') as rewards, patch.object(bot, 'run_stamina') as stamina,
                   patch.object(bot, 'run_explore'), patch.object(bot, 'run_pet_skill') as pet,
                   patch.object(bot, 'run_treasure') as treasure,
-                  patch.object(bot.task_rewards, 'run') as task_reward):
+                  patch.object(bot.task_rewards, 'run') as task_reward,
+                  patch.object(bot.alliance_chests, 'run') as chests):
                 for task in tasks.values():
                     task()
             self.assertEqual(stamina.call_count, int('warehouse' not in disabled))
             self.assertEqual(task_reward.call_count, int('task_rewards' not in disabled))
+            self.assertEqual(chests.call_count, int('alliance_chests' not in disabled))
+            donations = [call for call in city.call_args_list if call.kwargs.get('recruit') is False]
+            if donations:
+                self.assertEqual(donations[0].kwargs['collect_alliance_chests'], 'alliance_chests' not in disabled)
             self.assertEqual(treasure.call_count, int('treasure' not in disabled))
             self.assertEqual(pet.call_count, 0 if 'pet' in disabled else 4)
             self.assertEqual(train.call_count, int('train' not in disabled))
@@ -780,6 +787,37 @@ class ScheduleTest(unittest.TestCase):
         with patch.object(bot, 'recognize_text', return_value=[('下次免费：1天', (0, 0, 50, 30))]):
             self.assertEqual(bot.recruit_button_state(cooldown, {}, 'recruit_epic')[0], 'cooldown')
 
+    def test_unknown_drawer_hint_checks_page_without_spending_keys(self):
+        drawer = Image.new('RGB', bot.EXPECTED_SIZE)
+        recruit = Image.new('RGB', bot.EXPECTED_SIZE, 'blue')
+        reward = Image.new('RGB', bot.EXPECTED_SIZE, 'red')
+        def page(image, templates, name, *args):
+            return ((name == 'drawer-open' and image is drawer)
+                    or (name == 'recruit-title' and image is recruit)
+                    or (name == 'reward-title' and image is reward))
+        for state in ('free', 'cooldown'):
+            frames = [recruit, reward, recruit, drawer] if state == 'free' else [recruit, drawer]
+            with (self.subTest(state=state),
+                  patch.object(bot, 'inspect', return_value=(True, None, 0)),
+                  patch.object(bot, 'task_drawer', return_value=drawer),
+                  patch.object(bot, 'recruit_row', return_value=(drawer, 955)),
+                  patch.object(bot, 'find_green', return_value=(0, 0, 0)),
+                  patch.object(bot, 'recognize_text', return_value=[]),
+                  patch.object(bot, 'countdown', return_value=None),
+                  patch.object(bot, 'task_page', side_effect=page),
+                  patch.object(bot, 'task_screen', side_effect=frames),
+                  patch.object(bot, 'recruit_button_state', side_effect=lambda image, templates, kind:
+                               (state if kind == 'recruit_advanced' else 'cooldown', 'verified')),
+                  patch.object(bot, 'recruit_timer', return_value=drawer),
+                  patch.object(bot, 'task_tap') as tap,
+                  contextlib.redirect_stdout(io.StringIO())):
+                bot.run_city_tasks('test', None, None, {'free-label': drawer}, initial_image=drawer,
+                                   donate=False, timers={}, keep_open=True)
+            targets = [call.args[1:] for call in tap.call_args_list]
+            self.assertEqual(targets[0], (600, 970))
+            self.assertEqual((280, 1690) in targets, state == 'free')
+            self.assertNotIn((280, 2230), targets)
+
     def test_epic_cooldown_returns_without_clicking_recruit(self):
         frame = Image.new('RGB', (1080, 2340))
         recruit = frame.copy()
@@ -857,7 +895,7 @@ class ScheduleTest(unittest.TestCase):
         away, ready, claimed = map(frame, ('after-training-back', 'stamina-ready', 'stamina-claimed'))
         self.assertIsNone(bot.warehouse_position(away))
         offset = bot.warehouse_position(ready)
-        self.assertEqual(offset, (-35, -266))
+        self.assertEqual(offset, (-35, -263))
         self.assertIsNotNone(bot.stamina_target(ready, offset))
         self.assertIsNone(bot.stamina_target(claimed, offset))
         self.assertIsNone(bot.warehouse_countdown(ready, offset=offset))

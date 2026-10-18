@@ -1,27 +1,32 @@
-"""Background GitHub Releases updates using only Python's standard library."""
+"""Background GitHub Releases updates with bundled and system CA certificates."""
 
 from copy import deepcopy
 import hashlib
 import hmac
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import ssl
 import stat
 import threading
-from urllib.error import HTTPError
+import time
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, quote
-from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.request import Request, build_opener, HTTPRedirectHandler, HTTPSHandler
 import uuid
 import zipfile
+
+import certifi
 
 from app_version import VERSION, REPOSITORY, UPDATE_PROTOCOL
 
 
 MAX_DOWNLOAD = 2 * 1024**3
 MAX_EXTRACTED = 4 * 1024**3
-DATA_FOLDERS = {"configs", "logs", "artifacts", ".desktop-cache"}
+DATA_FOLDERS = {"configs", "device_notes", "logs", "artifacts", ".desktop-cache"}
 PAYLOAD_FOLDERS = {"runtime", "assets", ".tools", "scripts"}
 PAYLOAD_FILES = {"GameBot.exe", "GameBot.Updater.exe", "README.md",
                  "requirements-bundled.txt", "release.json"}
@@ -56,10 +61,51 @@ class GithubRedirects(HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, newurl)
 
 
+def update_ssl_context():
+    # Keep system trust (including managed proxy certificates) and supplement
+    # it with Mozilla roots shipped in the portable runtime. Never bypass TLS.
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+def network_error_message(error):
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return 'HTTPS 证书验证失败，请检查系统时间、Windows 根证书或代理/安全软件的证书配置'
+    if isinstance(reason, ssl.SSLEOFError) or (isinstance(reason, ssl.SSLError) and getattr(reason, 'reason', None) == 'UNEXPECTED_EOF_WHILE_READING'):
+        return 'GitHub HTTPS 连接被提前关闭，请检查代理或网络连接后重试'
+    if isinstance(reason, TimeoutError):
+        return '连接 GitHub 超时，请检查网络或代理后重试'
+    if isinstance(reason, (ConnectionError, IncompleteRead)):
+        return 'GitHub 连接中断，请检查网络或代理后重试'
+    return str(error)
+
+
+def transient_network_error(error):
+    reason = error.reason if isinstance(error, URLError) else error
+    return (not isinstance(error, HTTPError) and not isinstance(reason, ssl.SSLCertVerificationError)
+            and (isinstance(reason, (ssl.SSLEOFError, TimeoutError, ConnectionError, IncompleteRead))
+                 or (isinstance(reason, ssl.SSLError) and getattr(reason, 'reason', None) == 'UNEXPECTED_EOF_WHILE_READING')))
+
+
+def read_url(url, limit):
+    # Retry the whole small response so a disconnect during read also recovers.
+    # Certificate and HTTP errors keep their original handling and TLS policy.
+    for attempt in range(3):
+        try:
+            with open_url(url) as response:
+                return response.read(limit)
+        except (OSError, IncompleteRead) as error:
+            if attempt == 2 or not transient_network_error(error):
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
 def open_url(url):
     if not trusted_url(url):
         raise ValueError("更新地址必须是 GitHub 的 HTTPS 地址")
-    return build_opener(GithubRedirects()).open(Request(url, headers={
+    return build_opener(GithubRedirects(), HTTPSHandler(context=update_ssl_context())).open(Request(url, headers={
         "User-Agent": "GameBot-Updater", "Accept": "application/vnd.github+json" if
         urlsplit(url).hostname == "api.github.com" else "application/octet-stream",
         "X-GitHub-Api-Version": "2026-03-10",
@@ -159,11 +205,16 @@ def extract_package(archive, destination, expected_version):
         return inventory
 
 
+class DownloadCancelled(Exception):
+    pass
+
+
 class UpdateManager:
     def __init__(self, root, *, enabled=True):
         self.root = Path(root).resolve()
         self.lock = threading.RLock()
         self.cancelled = threading.Event()
+        self.download_cancelled = threading.Event()
         self.release = None
         self.stage = None
         self.plan = None
@@ -208,7 +259,7 @@ class UpdateManager:
 
     def check(self):
         with self.lock:
-            if not self.enabled or self.cancelled.is_set() or self.state['phase'] in ('checking', 'downloading', 'ready', 'installing'):
+            if not self.enabled or self.cancelled.is_set() or self.state['phase'] in ('checking', 'downloading', 'cancelling', 'ready', 'installing'):
                 return self.snapshot()
             self.state.update(phase='checking', message='正在检查 GitHub 正式版本…')
             self.thread = threading.Thread(target=self._check, daemon=True)
@@ -217,8 +268,7 @@ class UpdateManager:
 
     def _check(self):
         try:
-            with open_url(f'https://api.github.com/repos/{REPOSITORY}/releases/latest') as response:
-                raw = response.read(1024 * 1024 + 1)
+            raw = read_url(f'https://api.github.com/repos/{REPOSITORY}/releases/latest', 1024 * 1024 + 1)
             if len(raw) > 1024 * 1024:
                 raise ValueError('GitHub 版本响应过大')
             release = choose_release(json.loads(raw), self.version)
@@ -232,7 +282,7 @@ class UpdateManager:
                 'GitHub 请求受限，请稍后再试' if error.code in (403, 429) else f'GitHub 检查失败（HTTP {error.code}）')
             self._set(phase='error', message=message)
         except Exception as error:
-            self._set(phase='error', message=f'检查更新失败：{error}')
+            self._set(phase='error', message=f'检查更新失败：{network_error_message(error)}')
 
     def download(self):
         with self.lock:
@@ -242,21 +292,33 @@ class UpdateManager:
                 raise ValueError('请先检查并选择可用的新版本')
             self.state.update(phase='downloading', message='正在下载更新，现有任务继续运行…', downloaded=0,
                               total=self.release['size'])
+            self.download_cancelled.clear()
             self.thread = threading.Thread(target=self._download, args=(deepcopy(self.release),), daemon=True)
             self.thread.start()
             return self.snapshot()
 
+    def cancel_download(self):
+        with self.lock:
+            if self.state['phase'] == 'downloading':
+                self.download_cancelled.set()
+                self.state.update(phase='cancelling', message='正在取消下载…')
+            return self.snapshot()
+
+    def _check_download_cancelled(self):
+        if self.cancelled.is_set() or self.download_cancelled.is_set():
+            raise DownloadCancelled('下载已取消')
+
     def _download(self, release):
         stage = self.root / ('.update-stage-' + uuid.uuid4().hex)
         try:
+            self._check_download_cancelled()
             if shutil.disk_usage(self.root).free < release['size'] * 4 + 512 * 1024**2:
                 raise ValueError('磁盘空间不足，请至少保留更新包大小四倍加 512 MiB 的空间')
             stage.mkdir()
             self.stage = stage
             expected = release['sha256']
             if not expected:
-                with open_url(release['checksum_url']) as response:
-                    checksum = response.read(4097)
+                checksum = read_url(release['checksum_url'], 4097)
                 if len(checksum) > 4096:
                     raise ValueError('校验附件过大')
                 expected = checksum.decode('ascii').split()[0]
@@ -264,22 +326,22 @@ class UpdateManager:
                     raise ValueError('SHA-256 校验附件格式不正确')
             archive = stage / 'download.zip'
             digest, count = hashlib.sha256(), 0
+            self._check_download_cancelled()
             with open_url(release['url']) as response, archive.open('xb') as target:
                 while chunk := response.read(1024 * 1024):
-                    if self.cancelled.is_set():
-                        raise RuntimeError('下载已取消')
+                    self._check_download_cancelled()
                     count += len(chunk)
                     if count > release['size']:
                         raise ValueError('下载大小超过 Release 声明')
                     target.write(chunk)
                     digest.update(chunk)
                     self._set(downloaded=count)
+            self._check_download_cancelled()
             if count != release['size'] or not hmac.compare_digest(digest.hexdigest(), expected.lower()):
                 raise ValueError('更新包大小或 SHA-256 校验失败，未修改现有程序')
             self._set(message='下载完成，正在校验和准备更新文件…')
             files = extract_package(archive, stage / 'payload', release['version'])
-            if self.cancelled.is_set():
-                raise RuntimeError('更新已取消')
+            self._check_download_cancelled()
             # Run the currently installed updater from a separate folder so its
             # installed copy can itself be replaced by the incoming release.
             shutil.copy2(self.root / 'GameBot.Updater.exe', stage / 'GameBot.Updater.exe')
@@ -288,12 +350,17 @@ class UpdateManager:
             self.plan = stage / 'update-plan.json'
             self.plan.write_text(json.dumps(plan, ensure_ascii=False), encoding='utf-8')
             archive.unlink()
-            self._set(phase='ready', message='更新包已校验。点击“安装并重启”将停止任务并更新程序。')
+            with self.lock:
+                self._check_download_cancelled()
+                self._set(phase='ready', message='更新包已校验。点击“安装并重启”将停止任务并更新程序。')
         except Exception as error:
-            self._set(phase='error', message=f'下载或准备更新失败：{error}')
             if stage.exists() and stage.parent.resolve() == self.root:
                 shutil.rmtree(stage, ignore_errors=True)
             self.plan = None
+            if self.download_cancelled.is_set() and not self.cancelled.is_set():
+                self._set(phase='available', message='下载已取消，可重新更新', downloaded=0, total=0)
+            else:
+                self._set(phase='error', message=f'下载或准备更新失败：{network_error_message(error)}')
 
     def prepare_install(self):
         with self.lock:

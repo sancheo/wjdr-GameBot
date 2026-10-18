@@ -93,7 +93,7 @@ class RecruitTest(unittest.TestCase):
         read_timer.assert_called_once()
         self.assertEqual(read_timer.call_args.args[-1], "recruit_epic")
         self.assertEqual([call.args[1:] for call in tap.call_args_list],
-                         [(600, 1115), (280, 1690), (60, 190), (280, 2230), (60, 190), (60, 190)])
+                         [(600, 1115), (280, 1690), (540, 2100), (280, 2230), (540, 2100), (60, 190)])
 
     def test_existing_epic_cooldown_page_never_taps_recruit_button(self):
         image = frame("recruit-emulator-5556-cooldown-cooldown")
@@ -131,7 +131,7 @@ class RecruitTest(unittest.TestCase):
                                        initial_image=frame("recruit-5556-before"),
                                        donate=False, keep_open=True, timers=timers)
         self.assertIs(image, page)
-        self.assertEqual([call.args[1:] for call in tap.call_args_list], [(280, 1690), (540, 2100), (60, 190)])
+        self.assertEqual([call.args[1:] for call in tap.call_args_list], [(280, 1690), (540, 2100), (540, 2100)])
         self.assertEqual(timers["recruit_epic"], 0)
         open_drawer.assert_not_called()
 

@@ -108,7 +108,8 @@ class PetBatchTest(unittest.TestCase):
         self.assertEqual(self.actions.count((995, 505)), 1)
         self.assertEqual(self.actions.count((540, 1910)), 4)
         self.assertEqual(self.page, 'city')
-        self.assertEqual(self.timers, dict.fromkeys(bot.PET_SKILLS, 3700))
+        self.assertEqual(self.timers, {
+            name: float('inf') if name == 'pet_transport' else 3700 for name in bot.PET_SKILLS})
 
     def test_open_animation_is_waited_out_without_reopening(self):
         self.opening_frames = 2
@@ -132,7 +133,8 @@ class PetBatchTest(unittest.TestCase):
         self.assertEqual(self.actions.count((995, 505)), 1)
         self.assertEqual(self.actions.count((540, 2100)), 2)
         self.assertEqual(self.actions.count((540, 1910)), 4)
-        self.assertEqual(self.timers, dict.fromkeys(bot.PET_SKILLS, 3700))
+        self.assertEqual(self.timers, {
+            name: float('inf') if name == 'pet_transport' else 3700 for name in bot.PET_SKILLS})
         self.assertEqual(self.page, 'city')
 
     def test_active_buff_counts_as_success_and_keeps_batch_open(self):
@@ -141,7 +143,7 @@ class PetBatchTest(unittest.TestCase):
         self.assertEqual(self.actions.count((540, 1910)), 4)
         self.assertEqual(self.actions.count((995, 1720)), 1)
         self.assertEqual(self.actions.count((995, 505)), 1)
-        self.assertEqual(self.timers['pet_transport'], 700)
+        self.assertEqual(self.timers['pet_transport'], float('inf'))
 
     def test_already_active_skill_is_not_used_again(self):
         self.states['pet_transport'] = ('active', None)
@@ -149,7 +151,50 @@ class PetBatchTest(unittest.TestCase):
         self.assertEqual(self.actions.count((540, 1910)), 3)
         self.assertEqual(self.actions.count((995, 1720)), 1)
         self.assertEqual(self.actions.count((995, 505)), 1)
-        self.assertEqual(self.timers['pet_transport'], 700)
+        self.assertEqual(self.timers['pet_transport'], float('inf'))
+
+    def test_transport_use_continues_without_reading_post_use_state(self):
+        self.fail_uses.add('pet_transport')
+        with patch.object(bot, 'pet_skill_state', wraps=self.skill_state) as state:
+            self.schedule()
+        labels = [call.args[1] for call in state.call_args_list]
+        self.assertEqual(labels.count('重物搬运'), 1)
+        self.assertEqual(self.actions.count((540, 1910)), 4)
+        self.assertEqual(self.actions.count((995, 1720)), 1)
+        self.assertEqual(self.actions.count((995, 505)), 1)
+        use = self.actions.index((540, 1910),
+                                 self.actions.index(bot.PET_SKILLS['pet_transport'][1]))
+        self.assertEqual(self.actions[use + 1], bot.PET_SKILLS['pet_senses'][1])
+        self.assertEqual(self.timers['pet_transport'], float('inf'))
+        self.assertEqual(self.page, 'city')
+
+    def test_active_skills_and_used_transport_are_not_rechecked_after_ten_minutes(self):
+        for name in bot.PET_SKILLS:
+            if name != 'pet_transport':
+                self.states[name] = ('active', None)
+        with patch.object(bot, 'emit_task_event') as event:
+            self.schedule(seconds=1201)
+        for _, target in bot.PET_SKILLS.values():
+            self.assertEqual(self.actions.count(target), 1)
+        self.assertEqual(self.actions.count((540, 1910)), 1)
+        self.assertEqual(self.timers, dict.fromkeys(bot.PET_SKILLS, float('inf')))
+        waiting = [call.kwargs for call in event.call_args_list
+                   if call.kwargs.get('status') == 'waiting']
+        self.assertTrue(all(item['next_run'] is None for item in waiting[-4:]))
+
+    def test_other_skill_becoming_active_after_use_is_not_rechecked(self):
+        self.active_skills.add('pet_companion')
+        self.schedule(seconds=1201)
+        self.assertEqual(self.actions.count(bot.PET_SKILLS['pet_companion'][1]), 1)
+        self.assertEqual(self.timers['pet_companion'], float('inf'))
+
+    def test_transport_use_closes_page_when_run_alone_without_timers(self):
+        self.fail_uses.add('pet_transport')
+        with patch.object(bot, 'pet_skill_state', wraps=self.skill_state) as state:
+            bot.run_pet_skill('test', None, None, None, 'pet_transport', None)
+        self.assertEqual(state.call_count, 1)
+        self.assertEqual(self.actions.count((540, 1910)), 1)
+        self.assertEqual(self.page, 'city')
 
     def test_unknown_skill_closes_without_use_then_continues_remaining(self):
         self.states['pet_transport'] = ('unknown', None)
@@ -169,11 +214,11 @@ class PetBatchTest(unittest.TestCase):
             self.assertEqual(self.actions.count(target), 3 if name == 'pet_companion' else 1)
 
     def test_failed_skill_retry_does_not_repeat_completed_skills(self):
-        self.fail_uses.add('pet_transport')
+        self.fail_uses.add('pet_senses')
         self.schedule()
         self.assertEqual(self.actions.count(bot.PET_SKILLS['pet_companion'][1]), 1)
-        self.assertEqual(self.actions.count(bot.PET_SKILLS['pet_transport'][1]), 4)
-        self.assertEqual(self.actions.count(bot.PET_SKILLS['pet_senses'][1]), 1)
+        self.assertEqual(self.actions.count(bot.PET_SKILLS['pet_transport'][1]), 1)
+        self.assertEqual(self.actions.count(bot.PET_SKILLS['pet_senses'][1]), 4)
         self.assertEqual(self.actions.count(bot.PET_SKILLS['pet_gift'][1]), 1)
         self.assertEqual(self.page, 'city')
 

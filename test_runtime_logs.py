@@ -13,6 +13,22 @@ import runtime_logs as logs
 
 
 class RuntimeLogsTest(unittest.TestCase):
+    def test_latest_history_loads_entire_session_across_midnight(self):
+        started = datetime(2026, 10, 17, 23, 59, 0)
+        session = logs.SessionLogs(self.root, "serial:small", started)
+        with patch.object(logs, "datetime") as clock:
+            clock.now.return_value = started
+            session.append("首次异常：early")
+            clock.now.return_value = started + timedelta(minutes=2)
+            for index in range(2010):
+                session.append(f"normal {index}")
+        entries = logs.SessionLogs.latest_entries(self.root, "serial:small")
+        self.assertEqual(len(entries), 2011)
+        self.assertTrue(entries[0][1])
+        self.assertIn("early", entries[0][0])
+        self.assertFalse(entries[-1][1])
+        self.assertEqual(logs.SessionLogs.latest_entries(self.root, "serial:other"), [])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -78,10 +94,19 @@ class RuntimeLogsTest(unittest.TestCase):
         self.assertIn("partial line", paths["runtime"].read_text(encoding="utf-8"))
         self.assertIn("failure details", paths["exception"].read_text(encoding="utf-8"))
 
-    def test_retry_exception_is_saved_even_before_retry_exhaustion(self):
+    def test_retry_warnings_stay_out_of_exception_log(self):
         session = logs.SessionLogs(self.root, "avd:Pixel_5")
-        session.append("启动时主城检查 首次异常：等待超时；10 秒后重试")
-        self.assertIn("首次异常", session.paths()["exception"].read_text(encoding="utf-8"))
+        for stage in ("首次异常", "第 1 次重试异常", "第 2 次重试异常"):
+            line = f"[2026-10-18 22:50:17] 资源采集 {stage}：未确认野外；10 秒后尝试恢复主城并重试（第 1 次）"
+            self.assertTrue(logs.is_retry(line))
+            self.assertFalse(logs.is_error(line))
+            session.append(line)
+        self.assertEqual(session.paths()["exception"].read_text(encoding="utf-8"), "")
+        self.assertEqual(len(session.paths()["runtime"].read_text(encoding="utf-8").splitlines()), 3)
+        final = "已停止：RetriesExhausted: 资源采集 重试失败：未确认野外；连续3次重试失败"
+        self.assertFalse(logs.is_retry(final))
+        session.append(final)
+        self.assertIn(final, session.paths()["exception"].read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

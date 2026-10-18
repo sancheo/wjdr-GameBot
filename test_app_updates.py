@@ -6,10 +6,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from urllib.error import URLError
 from unittest.mock import patch
 import zipfile
 
@@ -45,6 +48,131 @@ def package(extra=None, version='1.0.1'):
 
 
 class UpdateTests(unittest.TestCase):
+    def setUp(self):
+        # Update fixtures model 1.0.0 -> 1.0.1 independently of the release being built.
+        version = patch.object(updates, 'VERSION', '1.0.0')
+        version.start()
+        self.addCleanup(version.stop)
+
+    def test_check_recovers_from_tls_eof_and_interrupted_body(self):
+        for during_read in (False, True):
+            with self.subTest(during_read=during_read), tempfile.TemporaryDirectory() as temp:
+                manager = updates.UpdateManager(temp)
+                error = ssl.SSLEOFError(8, 'EOF occurred in violation of protocol')
+                broken = io.BytesIO()
+                if during_read:
+                    broken.read = lambda limit: (_ for _ in ()).throw(error)
+                responses = [broken if during_read else URLError(error), io.BytesIO(json.dumps(release()).encode())]
+                with patch.object(updates, 'open_url', side_effect=responses) as network, patch.object(updates.time, 'sleep'):
+                    manager._check()
+                self.assertEqual(manager.snapshot()['phase'], 'available', manager.snapshot()['message'])
+                self.assertEqual(network.call_count, 2)
+                if during_read:
+                    self.assertTrue(broken.closed)
+
+    def test_persistent_tls_eof_has_bounded_retries_and_readable_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = updates.UpdateManager(temp)
+            error = URLError(ssl.SSLEOFError(8, 'EOF occurred in violation of protocol'))
+            with patch.object(updates, 'open_url', side_effect=error) as network, patch.object(updates.time, 'sleep') as backoff:
+                manager._check()
+            self.assertEqual(network.call_count, 3)
+            self.assertEqual(backoff.call_count, 2)
+            self.assertEqual(manager.snapshot()['phase'], 'error')
+            self.assertIn('HTTPS 连接被提前关闭', manager.snapshot()['message'])
+
+    def test_cancel_download_cleans_stage_and_allows_retry_through_bridge(self):
+        raw = package()
+        entered, resume = threading.Event(), threading.Event()
+        class SlowResponse(io.BytesIO):
+            def read(self, limit):
+                entered.set()
+                if not resume.wait(5):
+                    raise TimeoutError('test response did not resume')
+                return super().read(limit)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'runtime/python').mkdir(parents=True)
+            (root / 'runtime/python/python.exe').touch()
+            (root / 'GameBot.Updater.exe').write_bytes(b'old')
+            api = gui_web.DesktopApi(root)
+            manager = api._updates
+            manager.release = updates.choose_release(release(payload=raw), manager.version)
+            manager._set(phase='available', new_version=manager.release['version'])
+            try:
+                with patch.object(updates, 'open_url', return_value=SlowResponse(raw)), \
+                        patch.object(updates.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(10**10, 0, 10**10)):
+                    api.download_update()
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        self.assertEqual(api.cancel_update_download()['update']['phase'], 'cancelling')
+                        api.check_updates()
+                        self.assertEqual(manager.snapshot()['phase'], 'cancelling')
+                    finally:
+                        resume.set()
+                        manager.thread.join(5)
+                self.assertEqual(manager.snapshot()['phase'], 'available')
+                self.assertFalse(any(root.glob('.update-stage-*')))
+                self.assertIsNone(manager.plan)
+                self.assertEqual((root / 'GameBot.Updater.exe').read_bytes(), b'old')
+                with patch.object(updates, 'open_url', return_value=io.BytesIO(raw)), \
+                        patch.object(updates.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(10**10, 0, 10**10)):
+                    api.download_update()
+                    manager.thread.join(5)
+                self.assertEqual(manager.snapshot()['phase'], 'ready', manager.snapshot()['message'])
+            finally:
+                api._close()
+
+    def test_bundled_roots_work_without_system_certificates(self):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.assertEqual(context.cert_store_stats()['x509_ca'], 0)
+        with patch.object(updates.ssl, 'create_default_context', return_value=context):
+            configured = updates.update_ssl_context()
+        self.assertGreater(configured.cert_store_stats()['x509_ca'], 0)
+        self.assertTrue(configured.check_hostname)
+        self.assertEqual(configured.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_bundled_roots_preserve_system_trust(self):
+        context = ssl.create_default_context()
+        system_roots = set(context.get_ca_certs(binary_form=True))
+        with patch.object(updates.ssl, 'create_default_context', return_value=context):
+            configured = updates.update_ssl_context()
+        self.assertTrue(system_roots.issubset(set(configured.get_ca_certs(binary_form=True))))
+
+    def test_certificate_failure_is_not_retried_without_verification(self):
+        error = URLError(ssl.SSLCertVerificationError(1, 'unable to get local issuer certificate'))
+        with patch.object(updates, 'build_opener') as factory:
+            factory.return_value.open.side_effect = error
+            with self.assertRaises(URLError):
+                updates.open_url(f'https://api.github.com/repos/{REPOSITORY}/releases/latest')
+            factory.return_value.open.assert_called_once()
+            handlers = factory.call_args.args
+            self.assertTrue(any(isinstance(h, updates.GithubRedirects) for h in handlers))
+            https = next(h for h in handlers if isinstance(h, updates.HTTPSHandler))
+            self.assertTrue(https._context.check_hostname)
+            self.assertEqual(https._context.verify_mode, ssl.CERT_REQUIRED)
+            factory.reset_mock()
+            for url in ('http://api.github.com/', 'https://example.com/'):
+                with self.assertRaises(ValueError): updates.open_url(url)
+            factory.assert_not_called()
+
+    def test_certificate_failure_shows_actionable_check_and_download_errors(self):
+        for wrapped in (False, True):
+            error = ssl.SSLCertVerificationError(1, 'unable to get local issuer certificate')
+            if wrapped:
+                error = URLError(error)
+            with self.subTest(wrapped=wrapped), tempfile.TemporaryDirectory() as temp:
+                manager = updates.UpdateManager(temp)
+                with patch.object(updates, 'open_url', side_effect=error):
+                    manager._check()
+                    self.assertEqual(manager.snapshot()['phase'], 'error')
+                    self.assertIn('HTTPS 证书验证失败', manager.snapshot()['message'])
+                    self.assertIn('代理/安全软件', manager.snapshot()['message'])
+                    with patch.object(updates.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(10**10, 0, 10**10)):
+                        manager._download(updates.choose_release(release(), manager.version))
+                    self.assertIn('HTTPS 证书验证失败', manager.snapshot()['message'])
+                    self.assertFalse(any(Path(temp).glob('.update-stage-*')))
+
     def test_numeric_versions_skip_downgrades_drafts_and_prereleases(self):
         self.assertGreater(updates.version_tuple('v1.10.0'), updates.version_tuple('1.9.0'))
         self.assertIsNone(updates.choose_release(release('0.9.0'), '1.0.0'))
@@ -182,24 +310,24 @@ class UpdateTests(unittest.TestCase):
                     self.assertEqual(api.get_state()['update']['phase'], 'available')
                     api.download_update(); api._updates.thread.join(5)
                 self.assertEqual(api.get_state()['update']['phase'], 'ready')
-                api._launches['pending'] = object()
+                api._resume_state = 'starting'
                 with self.assertRaisesRegex(ValueError, '等待'): api.install_update()
                 self.assertEqual(api.get_state()['update']['phase'], 'ready')
-                api._launches.clear()
+                api._resume_state = 'idle'
                 output = io.StringIO()
                 gui_web.serve_bridge(api, io.StringIO('{"id":1,"method":"install_update"}\n{"method":"close"}\n'), output)
                 plan = Path(json.loads(output.getvalue())['result']['install_plan'])
                 self.assertTrue(plan.is_file())
                 self.assertTrue(api._updating)
-            finally: api._launches.clear(); api._close()
+            finally: api._resume_state = 'idle'; api._close()
 
-    def test_install_guard_blocks_new_tasks_and_emulator_launch(self):
+    def test_install_guard_blocks_new_tasks(self):
         with tempfile.TemporaryDirectory() as temp:
             api = gui_web.DesktopApi(temp)
             api._updating = True
             try:
-                for method, args in ((api.start, ({},)), (api.launch_emulator, ('x',)), (api.restart_emulator, ('x',))):
-                    with self.assertRaisesRegex(ValueError, '更新'): method(*args)
+                with self.assertRaisesRegex(ValueError, '更新'):
+                    api.start({})
             finally: api._close()
 
 

@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -25,6 +26,7 @@ internal static class Program
     internal static readonly string Browser = Portable ? Path.Combine(Root, "runtime", "webview2") : null;
     internal static bool CheckUi;
     internal static bool CheckStartup;
+    internal static bool CheckLogs;
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SetDllDirectory(string path);
@@ -35,7 +37,8 @@ internal static class Program
     private static void Main(string[] args)
     {
         CheckStartup = Array.IndexOf(args, "--check-startup") >= 0;
-        CheckUi = CheckStartup || Array.IndexOf(args, "--check-ui") >= 0;
+        CheckLogs = Array.IndexOf(args, "--check-logs") >= 0;
+        CheckUi = CheckStartup || CheckLogs || Array.IndexOf(args, "--check-ui") >= 0;
         if (CheckUi)
         {
             Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true });
@@ -113,6 +116,7 @@ internal sealed class DesktopWindow : Form
     private StreamWriter backendInput;
     private bool closing;
     private readonly StringBuilder backendError = new StringBuilder();
+    private int rejectedBackendMessages;
 
     internal DesktopWindow()
     {
@@ -183,7 +187,8 @@ internal sealed class DesktopWindow : Form
                 if (await Task.WhenAny(loaded.Task, Task.Delay(15000)) != loaded.Task)
                     throw new TimeoutException("WebView2 页面加载超时");
                 await loaded.Task;
-                if (Program.CheckStartup) await CheckStartupInterface();
+                if (Program.CheckLogs) { await CheckStartupInterface(); await CheckLogInterface(); }
+                else if (Program.CheckStartup) await CheckStartupInterface();
                 else await CheckInterface();
                 Close();
             }
@@ -220,11 +225,7 @@ internal sealed class DesktopWindow : Form
         backend.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
         {
             if (e.Data == null) return;
-            lock (backendError)
-            {
-                backendError.AppendLine(e.Data);
-                if (backendError.Length > 4000) backendError.Remove(0, backendError.Length - 4000);
-            }
+            RecordBackendDiagnostic(e.Data);
         };
         backend.Exited += delegate
         {
@@ -280,27 +281,58 @@ internal sealed class DesktopWindow : Form
     private void SendResponse(string response)
     {
         if (closing || IsDisposed || !IsHandleCreated) return;
+        Dictionary<string, object> message;
+        try
+        {
+            message = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }
+                .Deserialize<Dictionary<string, object>>(response);
+            if (message == null || (!message.ContainsKey("id") && !message.ContainsKey("fatal")))
+                throw new ArgumentException("后台消息不是 JSON RPC 响应");
+        }
+        catch (ArgumentException)
+        {
+            Interlocked.Increment(ref rejectedBackendMessages);
+            RecordBackendDiagnostic(response);
+            return;
+        }
+        catch (InvalidOperationException)
+        {
+            Interlocked.Increment(ref rejectedBackendMessages);
+            RecordBackendDiagnostic(response);
+            return;
+        }
         try
         {
             BeginInvoke(new Action(delegate
             {
-                if (!closing && view.CoreWebView2 != null)
+                // BeginInvoke runs later: an outer catch cannot catch failures
+                // here, and the window may have closed since it was queued.
+                if (closing || IsDisposed || view.IsDisposed || view.CoreWebView2 == null) return;
+                try
                 {
                     view.CoreWebView2.PostWebMessageAsJson(response);
-                    if (response.Contains("install_plan"))
+                    object result;
+                    if (message.TryGetValue("result", out result))
                     {
-                        var message = json.Deserialize<Dictionary<string, object>>(response);
-                        object result;
-                        if (message.TryGetValue("result", out result))
-                        {
-                            var data = result as Dictionary<string, object>;
-                            if (data != null && data.ContainsKey("install_plan")) BeginUpdate(Convert.ToString(data["install_plan"]));
-                        }
+                        var data = result as Dictionary<string, object>;
+                        if (data != null && data.ContainsKey("install_plan")) BeginUpdate(Convert.ToString(data["install_plan"]));
                     }
                 }
+                catch (ArgumentException error) { RecordBackendDiagnostic(error.Message); }
+                catch (InvalidOperationException error) { RecordBackendDiagnostic(error.Message); }
+                catch (COMException error) { RecordBackendDiagnostic(error.Message); }
             }));
         }
         catch (InvalidOperationException) { }
+    }
+
+    private void RecordBackendDiagnostic(string message)
+    {
+        lock (backendError)
+        {
+            backendError.AppendLine(message);
+            if (backendError.Length > 4000) backendError.Remove(0, backendError.Length - 4000);
+        }
     }
 
     private async void BeginUpdate(string plan)
@@ -366,6 +398,42 @@ internal sealed class DesktopWindow : Form
         throw new InvalidOperationException("新版界面、资源或后台未就绪。");
     }
 
+    private async Task CheckLogInterface()
+    {
+        await view.CoreWebView2.ExecuteScriptAsync(@"
+            window.checkedLogs=false;
+            window.pywebview.api.get_state().then(async s=>{
+                s.logs=[];s.last_log=0;s.log_reset=true;render(s);
+                s.log_reset=false;
+                s.logs=Array.from({length:4010},(_,index)=>({id:index+1,
+                    text:index===0?'<script>unsafe()</script>':'日志 '+index,error:index%300===0}));
+                s.last_log=4010;s.running=true;render(s);
+                s.running=false;render(s);render(s);
+                const retained=document.getElementById('log-lines').childElementCount===4010
+                    &&document.getElementById('error-lines').childElementCount===14
+                    &&!document.querySelector('#log-lines script');
+                const path = 'C:/异常截图/模拟器 A/失败 <截图>.png';
+                const text = '失败截图：'+path+'；故障截图清理失败：测试';
+                s.logs=[{id:4011,text,error:true}];s.last_log=4011;render(s);
+                const link = document.querySelector('#error-lines .screenshot-link');
+                const api = window.pywebview.api;
+                const original = api.open_screenshot;
+                let opened = null;
+                try {
+                    api.open_screenshot = async value => {opened=value;return true;};
+                    if (link) link.click();
+                    await Promise.resolve();
+                    window.checkedLogs = retained && !!link && link.textContent===path
+                        && link.parentNode.textContent===text && opened===path
+                        && !link.querySelector('截图');
+                } finally {api.open_screenshot=original;}
+                s.logs=[];s.last_log=0;s.log_reset=true;render(s);
+            });");
+        for (int i = 0; i < 60 && !await JsBool("window.checkedLogs === true"); i++) await Task.Delay(50);
+        if (!await JsBool("window.checkedLogs === true")) throw new InvalidOperationException("日志去重或文本显示失败");
+        Console.WriteLine("Log UI checks passed: 4010 runtime lines and 14 exceptions retained after stop and repeated snapshots; text escaped; screenshot link opens the exact path.");
+    }
+
     private async Task CheckInterface()
     {
         // Real EXE/WebView2/pipe integration. Test backend does not enumerate ADB.
@@ -375,7 +443,23 @@ internal sealed class DesktopWindow : Form
             if (i == 99) throw new InvalidOperationException("图片或 Python 桥接未就绪");
             await Task.Delay(50);
         }
-        if (!await JsBool("document.querySelectorAll('[data-option]').length === 31 && document.querySelector('#daily #option-task_rewards') !== null && document.querySelector('#alt-account #option-help_clicker') !== null && document.querySelector('#training #option-heal') !== null && document.querySelector('#wilderness #option-hunt') !== null && document.querySelector('#hunt-level-beast').options.length === 30 && JSON.stringify(Array.from(document.querySelector('#hunt-level-polar_beast').options, option => option.value)) === JSON.stringify(['2级','3级','4级','5级','6级'])"))
+        await view.CoreWebView2.ExecuteScriptAsync(@"
+            window.bridgeProbe = '';
+            window.chrome.webview.addEventListener('message', event => {
+                if (event.data.id === -1) window.bridgeProbe = event.data.result;
+            });");
+        int rejectedBefore = rejectedBackendMessages;
+        SendResponse("[2026-10-16 08:00:00] 屏幕适配：1176×2400 → 1080×2340");
+        SendResponse("{invalid JSON");
+        SendResponse("[]");
+        SendResponse(json.Serialize(new { id = -1, result = "中文响应与日志隔离正常" }));
+        for (int i = 0; i < 100 && !await JsBool("window.bridgeProbe === '中文响应与日志隔离正常'"); i++)
+            await Task.Delay(50);
+        if (rejectedBackendMessages != rejectedBefore + 3 ||
+            !await JsBool("window.bridgeProbe === '中文响应与日志隔离正常' && connected"))
+            throw new InvalidOperationException("后台诊断隔离或 JSON 响应验证失败");
+        Console.WriteLine("Bridge validation passed: plain diagnostics, malformed JSON and arrays rejected; valid Unicode response delivered.");
+        if (!await JsBool("document.querySelectorAll('[data-option]').length === 30 && document.querySelector('#daily #option-task_rewards') !== null && document.querySelector('#alt-account #option-help_clicker') !== null && document.querySelector('#training #option-heal') !== null && document.querySelector('#wilderness #option-hunt') !== null && document.querySelector('#hunt-level-beast').options.length === 30 && JSON.stringify(Array.from(document.querySelector('#hunt-level-polar_beast').options, option => option.value)) === JSON.stringify(['2级','3级','4级','5级','6级'])"))
             throw new InvalidOperationException("任务控件不完整");
         await view.CoreWebView2.ExecuteScriptAsync(@"
             window.checkedUpdates = false;
@@ -383,40 +467,64 @@ internal sealed class DesktopWindow : Form
                 const api = window.pywebview.api;
                 const original = await api.get_state();
                 const saved = {get_state:api.get_state, check_updates:api.check_updates,
-                    download_update:api.download_update, install_update:api.install_update};
+                    download_update:api.download_update, cancel_update_download:api.cancel_update_download, install_update:api.install_update};
                 const fixture = {...original, update:{version:'1.0.0', phase:'idle', message:'尚未检查更新',
                     installable:true, new_version:'', notes:'', downloaded:0, total:100}};
-                let checked = false, downloaded = false, installed = false;
+                let checked = false, downloaded = false, cancelled = false, installed = false;
                 try {
                     api.get_state = async () => fixture;
                     api.check_updates = async () => {checked=true; Object.assign(fixture.update, {
                         phase:'available', new_version:'1.0.1', notes:'<script>unsafe()</script>', message:'发现新版本'}); return fixture;};
                     api.download_update = async () => {downloaded=true; fixture.update.phase='downloading'; return fixture;};
+                    api.cancel_update_download = async () => {cancelled=true; fixture.update.phase='available'; return fixture;};
                     api.install_update = async () => {installed=true; fixture.update.phase='installing'; return {};};
                     render(fixture);
+                    if (!document.getElementById('new-version').hidden || document.getElementById('update-dialog').open ||
+                        document.getElementById('update-panel')) throw new Error('无更新时仍显示更新提示');
+                    fixture.update.phase='current'; fixture.update.installable=false; render(fixture);
+                    if (!document.getElementById('new-version').hidden || document.body.innerText.includes('当前已是最新正式版本') ||
+                        document.body.innerText.includes('自动安装仅支持便携发行版')) throw new Error('最新版本提示未移除');
+                    fixture.update.installable=true;
                     document.getElementById('check-updates').click(); await mutation;
                     if (!checked || document.getElementById('app-version').textContent !== 'v1.0.0' ||
-                        document.getElementById('update-action').hidden || document.querySelector('#update-notes script') ||
+                        document.getElementById('new-version').hidden || document.getElementById('update-dialog').open || document.querySelector('#update-notes script') ||
                         document.getElementById('update-notes').textContent !== '<script>unsafe()</script>')
                         throw new Error('版本、更新说明或检查按钮错误');
+                    const badge = document.getElementById('new-version');
+                    if (getComputedStyle(badge).color !== 'rgb(207, 40, 56)' || badge.textContent !== '新版本' ||
+                        !document.querySelector('.branding').contains(badge)) throw new Error('标题右上角新版红字缺失');
+                    badge.click();
+                    if (!document.getElementById('update-dialog').open || document.getElementById('update-version').textContent !== 'v1.0.1' ||
+                        document.getElementById('update-action').textContent !== '更新') throw new Error('新版弹窗或更新按钮缺失');
+                    document.getElementById('update-cancel').click(); render(fixture);
+                    if (document.getElementById('update-dialog').open || downloaded || installed || badge.hidden)
+                        throw new Error('取消弹窗触发了更新或隐藏了新版入口');
+                    badge.click();
                     document.getElementById('update-action').click(); await mutation;
                     fixture.update.downloaded=50; render(fixture);
                     if (!downloaded || document.getElementById('update-progress').hidden ||
                         document.getElementById('update-progress').value !== 50 || !document.getElementById('check-updates').disabled)
                         throw new Error('下载按钮、进度或重复检查保护错误');
+                    document.getElementById('update-cancel').click(); await mutation;
+                    if (!cancelled || document.getElementById('update-dialog').open || fixture.update.phase !== 'available')
+                        throw new Error('取消下载未传递到后台');
+                    badge.click(); document.getElementById('update-action').click(); await mutation;
+                    fixture.update.phase='error'; fixture.update.message='下载连接中断'; render(fixture);
+                    if (document.getElementById('update-message').hidden || document.getElementById('update-action').disabled)
+                        throw new Error('下载错误或重试按钮缺失');
                     fixture.update.phase='ready'; render(fixture);
                     if (document.getElementById('update-action').textContent !== '安装并重启') throw new Error('安装按钮缺失');
                     document.getElementById('update-action').click(); await mutation; render(fixture);
-                    if (!installed || !document.getElementById('update-action').hidden) throw new Error('安装操作或重复安装保护错误');
+                    if (!installed || !document.getElementById('update-action').disabled) throw new Error('安装操作或重复安装保护错误');
                     fixture.update.phase='available'; fixture.update.installable=false; render(fixture);
                     if (!document.getElementById('update-action').disabled) throw new Error('源码模式允许自动安装');
                     window.checkedUpdates=true;
-                } finally {Object.assign(api, saved); render(original);}
+                } finally {document.getElementById('update-dialog').close(); Object.assign(api, saved); render(original);}
             })().catch(error => {window.checkedUpdates=String(error);});");
         for (int i = 0; i < 100 && !await JsBool("window.checkedUpdates === true"); i++) await Task.Delay(50);
         if (!await JsBool("window.checkedUpdates === true"))
             throw new InvalidOperationException("更新界面自检失败：" + await view.CoreWebView2.ExecuteScriptAsync("window.checkedUpdates"));
-        Console.WriteLine("Update UI checks passed: version, check/download/install buttons, notes as text, progress, duplicate request and source mode guards.");
+        Console.WriteLine("Update UI checks passed: quiet current version, red new-version entry, modal, cancel/reopen, notes as text, download/cancel/retry/install, progress and source mode guards.");
         await view.CoreWebView2.ExecuteScriptAsync(@"
             window.checkedBear = false;
             (async () => {
@@ -424,15 +532,19 @@ internal sealed class DesktopWindow : Form
                 const input = document.getElementById('option-bear');
                 const drive = document.getElementById('option-bear_drive');
                 const follow = document.getElementById('option-bear_follow');
+                const noHeroes = document.getElementById('option-bear_follow_no_heroes');
                 const settle = async () => { await new Promise(resolve => setTimeout(resolve, 180)); await mutation; };
                 try {
-                    if (input.checked || drive.checked || !follow.checked || !drive.disabled || !follow.disabled ||
+                    if (input.checked || drive.checked || follow.checked || !noHeroes.checked ||
+                        !drive.disabled || !follow.disabled || !noHeroes.disabled ||
                         document.querySelector('#wilderness .info').title !== '开启时其他任务不执行, 只专注打熊')
                         throw new Error('打熊默认值或提示错误');
                     input.click();
+                    follow.click();
                     await settle();
                     const state = await window.pywebview.api.get_state();
                     if (!state.config.options.bear || state.config.options.bear_drive || !state.config.options.bear_follow ||
+                        state.config.options.bear_follow_no_heroes || noHeroes.checked ||
                         drive.disabled || follow.disabled || !document.getElementById('option-intelligence').disabled ||
                         !document.getElementById('option-heal').disabled || !document.getElementById('option-help').disabled ||
                         document.getElementById('option-help_clicker').disabled || document.getElementById('option-reconnect').disabled)
@@ -544,21 +656,31 @@ internal sealed class DesktopWindow : Form
             window.checkedLevels = false;
             (async () => {
                 const original = formConfig();
-                window.checkedLevelDetails = JSON.stringify({original, options: Array.from(document.getElementById('level-meat').options, option => option.value)});
                 let verified = false;
                 try {
-                    for (const [name] of resources) {
-                        const input = document.getElementById('level-' + name);
-                        input.value = '4级矿';
-                        input.dispatchEvent(new Event('change', {bubbles: true}));
-                    }
+                    renderGatherSteps([{resource:'wood',level:'7级'}, {resource:'iron',level:'8级'}, {resource:'wood',level:'4级'}]);
+                    syncConfig();
+                    while (gatherSteps().length < 6) resourceList.querySelector('[data-gather-action=add]').click();
+                    if (resourceList.querySelector('[data-gather-action=add]') ||
+                        resourceList.querySelectorAll('.gather-step').length !== 6 ||
+                        resourceList.querySelectorAll('.gather-arrow').length !== 5)
+                        throw new Error('六项上限或箭头失败');
+                    while (gatherSteps().length > 1) resourceList.querySelector('[data-gather-action=remove]').click();
+                    if (resourceList.querySelector('[data-gather-action=remove]') ||
+                        resourceList.querySelector('.gather-arrow') || gatherSteps()[0].level !== '7级')
+                        throw new Error('最少一项或删除箭头失败');
+                    resourceList.querySelector('[data-gather-action=add]').click();
+                    const input = resourceList.querySelectorAll('[data-gather-level]')[1];
+                    input.value = '4级';
+                    input.dispatchEvent(new Event('change', {bubbles:true}));
                     await new Promise(resolve => setTimeout(resolve, 180));
                     await mutation;
                     const state = await window.pywebview.api.get_state();
-                    window.checkedLevelDetails = JSON.stringify({backend: state.config.resource_levels, form: formConfig().resource_levels});
-                    verified = resources.every(([name]) =>
-                        state.config.resource_levels[name] === '4级矿' &&
-                        formConfig().resource_levels[name] === '4级矿');
+                    const expected = [{resource:'wood',level:'7级'}, {resource:'meat',level:'4级'}];
+                    window.checkedLevelDetails = JSON.stringify({backend:state.config.gather_steps, form:gatherSteps()});
+                    const matches = steps => steps.length === expected.length && steps.every((step, index) =>
+                        step.resource === expected[index].resource && step.level === expected[index].level);
+                    verified = matches(state.config.gather_steps) && matches(gatherSteps());
                 } finally {
                     clearTimeout(syncTimer);
                     await window.pywebview.api.update_config(original);
@@ -567,7 +689,7 @@ internal sealed class DesktopWindow : Form
                 window.checkedLevels = verified;
             })().catch(error => {window.checkedLevels = 'failed'; window.checkedLevelDetails += String(error);});");
         for (int i = 0; i < 100 && !await JsBool("window.checkedLevels === true"); i++) await Task.Delay(50);
-        if (!await JsBool("window.checkedLevels === true")) throw new InvalidOperationException("资源下拉框4级选择或 Python 等级同步失败：" + await view.CoreWebView2.ExecuteScriptAsync("window.checkedLevelDetails"));
+        if (!await JsBool("window.checkedLevels === true")) throw new InvalidOperationException("资源采集动态子选项或 Python 顺序同步失败：" + await view.CoreWebView2.ExecuteScriptAsync("window.checkedLevelDetails"));
         await view.CoreWebView2.ExecuteScriptAsync(@"
             window.checkedHunt = false;
             (async () => {
@@ -610,46 +732,54 @@ internal sealed class DesktopWindow : Form
             (async () => {
                 const api = window.pywebview.api;
                 const original = await api.get_state();
-                const saved = {select_device: api.select_device, launch_emulator: api.launch_emulator, restart_emulator: api.restart_emulator,
-                    start: api.start, refresh_devices: api.refresh_devices, update_config: api.update_config};
-                const fixture = {...original, selected: 'avd:Pixel_5', devices: [
-                    {id:'avd:Pixel_5', key:'avd:Pixel_5', name:'Pixel_5', avd:'Pixel_5', serial:'emulator-test', status:'running'},
-                    {id:'avd:Pixel_5_2', key:'avd:Pixel_5_2', name:'Pixel_5_2', avd:'Pixel_5_2', serial:'', status:'stopped'}]};
+                const saved = {select_device: api.select_device,
+                    start: api.start, refresh_devices: api.refresh_devices, update_config: api.update_config, set_device_note: api.set_device_note};
+                const fixture = {...original, selected: 'serial:127.0.0.1:62001', devices: [
+                    {id:'serial:127.0.0.1:62001', key:'serial:127.0.0.1:62001', name:'夜神', avd:'', serial:'emulator-test', status:'running'},
+                    {id:'serial:127.0.0.1:62025', key:'serial:127.0.0.1:62025', name:'夜神 2', avd:'', serial:'', status:'stopped'},
+                    {id:'serial:PHONE123', key:'serial:PHONE123', name:'Pixel 7', kind:'physical', avd:'', serial:'PHONE123', status:'running'}]};
                 let launched = '', restarted = '', refreshed = false, updated = false;
                 try {
                     api.select_device = async id => { fixture.selected = id; return fixture; };
                     api.start = async () => { throw new Error('模拟器 Pixel_5_2 未启动'); };
-                    api.launch_emulator = async id => { launched = id; fixture.devices[1].status = 'starting'; return fixture; };
-                    api.restart_emulator = async id => { restarted = id; fixture.devices[0].status = 'restarting'; return fixture; };
                     api.refresh_devices = async () => { refreshed = true; return fixture; };
                     api.update_config = async () => { updated = true; return fixture; };
+                    api.set_device_note = async (id, note) => { fixture.devices.find(d => d.id === id).note = note.trim(); return fixture; };
                     render(fixture);
                     document.getElementById('device').click();
-                    if (document.getElementById('device-list').hidden || document.querySelectorAll('.device-choice').length !== 2 ||
-                        document.querySelectorAll('.device-launch').length !== 1 ||
-                        document.querySelectorAll('.device-restart').length !== 1 ||
+                    if (document.getElementById('device-list').hidden || document.querySelectorAll('.device-choice').length !== 3 ||
+                        document.querySelectorAll('.device-launch').length !== 0 ||
+                        document.querySelectorAll('.device-restart').length !== 0 ||
                         !document.getElementById('device-list').textContent.includes('未启动')) throw new Error('列表或启动按钮缺失');
+                    const choices = document.querySelectorAll('.device-choice');
+                    if (!choices[0].textContent.includes('模拟器') || !choices[2].textContent.includes('真机') ||
+                        !choices[2].textContent.includes('已连接') || choices[2].parentElement.querySelector('.device-restart'))
+                        throw new Error('真机类型、状态或按钮错误');
+                    document.querySelectorAll('.device-note')[2].click();
+                    if (!document.getElementById('device-note-dialog').open) throw new Error('备注窗口未打开');
+                    document.getElementById('device-note-input').value = '小号 <手机>';
+                    document.getElementById('device-note-save').click();
+                    await mutation;
+                    if (document.getElementById('device-note-dialog').open ||
+                        document.querySelectorAll('.device-choice')[2].querySelector('.device-note-text').textContent !== '小号 <手机>' ||
+                        selected !== 'serial:127.0.0.1:62001' || updated) throw new Error('备注保存修改了选择或任务配置');
+                    fixture.devices[2].status = 'unauthorized'; render(fixture);
+                    if (!document.querySelectorAll('.device-choice')[2].textContent.includes('待授权')) throw new Error('真机授权状态缺失');
+                    fixture.devices[2].status = 'offline'; render(fixture);
+                    if (!document.querySelectorAll('.device-choice')[2].textContent.includes('离线')) throw new Error('真机离线状态缺失');
                     document.querySelectorAll('.device-choice')[1].click();
                     await mutation;
-                    if (selected !== 'avd:Pixel_5_2' || document.getElementById('run').disabled) throw new Error('未启动模拟器选择失败');
+                    if (selected !== 'serial:127.0.0.1:62025' || document.getElementById('run').disabled) throw new Error('未启动模拟器选择失败');
                     document.getElementById('run').click();
                     await mutation;
                     if (!document.getElementById('notice').open || !document.getElementById('notice-message').textContent.includes('未启动'))
                         throw new Error('未启动提示缺失');
                     document.getElementById('notice').close();
                     document.getElementById('device').click();
-                    document.querySelector('.device-launch').click();
-                    await mutation;
-                    if (launched !== 'avd:Pixel_5_2' || document.querySelector('.device-launch') ||
-                        !document.getElementById('device-label').textContent.includes('启动中')) throw new Error('启动操作或状态更新失败');
-                    document.querySelector('.device-restart').click();
-                    await mutation;
-                    if (restarted !== 'avd:Pixel_5' || selected !== 'avd:Pixel_5_2' || document.querySelector('.device-restart') ||
-                        !document.getElementById('device-list').textContent.includes('重启中')) throw new Error('重启操作或状态更新失败');
                     fixture.devices[0].status = 'running';
                     fixture.running = true;
                     render(fixture);
-                    if (!document.querySelector('.device-restart').disabled) throw new Error('任务运行中仍允许重启');
+                    if (document.querySelector('.device-launch') || document.querySelector('.device-restart')) throw new Error('旧模拟器操作仍然存在');
                     if (document.getElementById('refresh').disabled) throw new Error('运行中刷新不可用');
                     document.getElementById('refresh').click();
                     await mutation;
@@ -658,15 +788,14 @@ internal sealed class DesktopWindow : Form
                 } finally {
                     Object.assign(api, saved);
                     document.getElementById('notice').close();
+                    document.getElementById('device-note-dialog').close();
                     closeDevices();
                     render(original);
                 }
             })().catch(error => {window.checkedEmulatorPicker = String(error);});");
         for (int i = 0; i < 100 && !await JsBool("window.checkedEmulatorPicker === true"); i++) await Task.Delay(50);
         if (!await JsBool("window.checkedEmulatorPicker === true")) throw new InvalidOperationException("模拟器下拉列表自检失败：" + await view.CoreWebView2.ExecuteScriptAsync("window.checkedEmulatorPicker"));
-        await view.CoreWebView2.ExecuteScriptAsync("window.checkedLogs=false; window.pywebview.api.get_state().then(s=>{s.logs=[{id:1,text:'<script>unsafe()</script>',error:false},{id:2,text:'异常日志',error:true}];s.last_log=2;render(s);render(s);window.checkedLogs=document.getElementById('log-lines').childElementCount===2&&document.getElementById('error-lines').childElementCount===1&&!document.querySelector('#log-lines script');s.logs=[];s.last_log=0;s.log_reset=true;render(s)})");
-        for (int i = 0; i < 60 && !await JsBool("window.checkedLogs === true"); i++) await Task.Delay(50);
-        if (!await JsBool("window.checkedLogs === true")) throw new InvalidOperationException("日志去重或文本显示失败");
+        await CheckLogInterface();
         await view.CoreWebView2.ExecuteScriptAsync(@"
             window.checkedTaskStatus = false;
             (async () => {
@@ -733,6 +862,6 @@ internal sealed class DesktopWindow : Form
         }
         await view.CoreWebView2.ExecuteScriptAsync("window.uiTracking=false");
         string frames = await view.CoreWebView2.ExecuteScriptAsync("JSON.stringify({frames:uiFrames.length,p95:uiFrames.slice().sort((a,b)=>a-b)[Math.floor(uiFrames.length*.95)]})");
-        Console.WriteLine("Desktop EXE checks passed: images, 31 controls, bear defaults/tooltip/checkboxes/Python sync/restore/exclusive dependencies, help-clicker default/tooltip/yes/no/cancel/window state/exclusive dependencies, independent auto-healing switch, monster levels/Python sync/last selection guard, level-4 dropdown/Python sync, Python bridge, emulator inventory/status/launch/restart/refresh, validation, log deduplication, task status/deadlines/single-task retry/stop guard, dependencies, 120 resizes, 1/2/3 waterfall columns with 10px gaps. Resize elapsed ms: " + clock.ElapsedMilliseconds + "; frame samples: " + frames);
+        Console.WriteLine("Desktop EXE checks passed: images, 30 controls, bear defaults/tooltip/checkboxes/Python sync/restore/exclusive dependencies, help-clicker default/tooltip/yes/no/cancel/window state/exclusive dependencies, independent auto-healing switch, monster levels/Python sync/last selection guard, dynamic gather steps/limits/arrows/Python order sync, Python bridge, emulator inventory/status/launch/restart/refresh, validation, log deduplication, task status/deadlines/single-task retry/stop guard, dependencies, 120 resizes, 1/2/3 waterfall columns with 10px gaps. Resize elapsed ms: " + clock.ElapsedMilliseconds + "; frame samples: " + frames);
     }
 }

@@ -6,10 +6,63 @@ from unittest.mock import patch
 
 from PIL import Image
 import help_bot as bot
+from screen_geometry import detect
 from test_help_bot import Clock
 
 
 class GatherTest(unittest.TestCase):
+    def test_unknown_capacity_stops_before_search(self):
+        frame = object()
+        with (patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'intelligence_queue_full', side_effect=bot.QueueCapacityUnavailable('covered')),
+              patch.object(bot, 'task_tap') as tap):
+            with self.assertRaises(bot.QueueCapacityUnavailable):
+                bot.search_gather_target('test', frame, 'wood', 8)
+        tap.assert_not_called()
+
+    def test_dispatches_once_without_rechecking_obscured_resource_card(self):
+        wilderness, search, card, dispatch = [object() for _ in range(4)]
+        def queue_check(image):
+            if image is card:
+                raise bot.QueueCapacityUnavailable('covered')
+            return False
+        with (patch.object(bot, 'enter_wilderness', return_value=wilderness),
+              patch.object(bot, 'task_screen', side_effect=[
+                  wilderness, wilderness, search, search, card, dispatch, wilderness]),
+              patch.object(bot, 'town_button', return_value=True),
+              patch.object(bot, 'intelligence_queue_full', side_effect=queue_check) as queue,
+              patch.object(bot, 'prepare_gather_search', return_value=search),
+              patch.object(bot, 'gather_notice', return_value=None),
+              patch.object(bot, 'gather_action_target', return_value=(540, 1245)),
+              patch.object(bot, 'gather_search_page', return_value=False),
+              patch.object(bot, 'intelligence_text_target', return_value=(825, 2240)),
+              patch.object(bot, 'task_tap') as tap,
+              patch.object(bot, 'task_back') as back,
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertIs(bot.run_gather('test', *([None] * 4), resources=('wood',)), wilderness)
+        self.assertEqual([call.args[0] for call in queue.call_args_list], [wilderness, search])
+        self.assertEqual([call.args[1:] for call in tap.call_args_list],
+                         [(65, 1735), (540, 2240), (540, 1245), (825, 2240)])
+        back.assert_not_called()
+
+    def test_phone_empty_search_stays_recognized_and_exits_with_back(self):
+        raw = Image.open(bot.ROOT / 'tests/fixtures/phone-iron-search-empty-1016.png').convert('RGB')
+        image = detect(raw).normalize(raw)
+        self.assertTrue(bot.gather_search_page(image))
+        self.assertTrue(bot.gather_search_page(image.convert('L')))
+        hidden = image.copy()
+        hidden.paste((55, 155, 245), (480, 2190, 615, 2300))
+        self.assertFalse(bot.gather_search_page(hidden))
+        wilderness = self.frame('gather-1007-search-closed')
+        town = bot.open_template(bot.ROOT / 'assets/emulator-town-button.png').convert('L')
+        with (patch.object(bot, 'TOWN_TEMPLATE', town),
+              patch.object(bot, 'task_screen', return_value=wilderness),
+              patch.object(bot, 'task_back') as back,
+              patch.object(bot, 'task_tap') as tap):
+            self.assertIs(bot.leave_gather('test', image), wilderness)
+        back.assert_called_once_with('test')
+        tap.assert_not_called()
+
     def test_monitor_accepts_wilderness_without_returning_to_city(self):
         clock = Clock()
         frame = self.frame('gather-live-start').convert('L')
@@ -69,18 +122,43 @@ class GatherTest(unittest.TestCase):
             bot.prepare_gather_search('test', maximum, 'iron', 8)
         tap.assert_called_once_with('test', 949, 1850)
 
+    def test_full_resource_filter_matches_configuration_and_checks_result(self):
+        frame = self.frame('gather-level-max')
+        for desired in (True, False):
+            for current in (True, False):
+                with self.subTest(desired=desired, current=current):
+                    with (patch.object(bot, 'gather_search_page', return_value=True),
+                          patch.object(bot, 'intelligence_text_target', return_value=(949, 1850)),
+                          patch.object(bot, 'set_gather_level', return_value=frame),
+                          patch.object(bot, 'gather_full_only', side_effect=[current, desired]),
+                          patch.object(bot, 'task_screen', return_value=frame),
+                          patch.object(bot, 'task_tap') as tap):
+                        self.assertIs(bot.prepare_gather_search('test', frame, 'iron', 8,
+                                                               full_only=desired), frame)
+                    toggles = [c for c in tap.call_args_list if c.args[1:] == (328, 2135)]
+                    self.assertEqual(len(toggles), int(current != desired))
+            with (patch.object(bot, 'gather_search_page', return_value=True),
+                  patch.object(bot, 'intelligence_text_target', return_value=(949, 1850)),
+                  patch.object(bot, 'set_gather_level', return_value=frame),
+                  patch.object(bot, 'gather_full_only', return_value=not desired),
+                  patch.object(bot, 'task_screen', return_value=frame),
+                  patch.object(bot, 'task_tap')):
+                with self.assertRaisesRegex(RuntimeError, '与配置一致'):
+                    bot.prepare_gather_search('test', frame, 'iron', 8, full_only=desired)
+
     def test_gathers_in_resource_order_and_stops_when_queue_fills(self):
         frame = self.frame('gather-live-start')
         for queues, expected in [([True], []),
-                                 ([False] * 6 + [True], ['meat', 'wood']),
+                                 ([False] * 4 + [True], ['iron', 'coal']),
                                  ([False, True], []),
-                                 ([False, False, True], [])]:
+                                 ([False, False, True], ['iron'])]:
             with (patch.object(bot, 'enter_wilderness', return_value=frame),
                   patch.object(bot, 'town_button', return_value=True),
                   patch.object(bot, 'intelligence_queue_full', side_effect=queues) as queue,
                   patch.object(bot, 'prepare_gather_search', return_value=frame) as prepare,
                   patch.object(bot, 'gather_search_page', return_value=False),
                   patch.object(bot, 'gather_notice', return_value=None),
+                  patch.object(bot, 'gather_action_target', return_value=(540, 1245)),
                   patch.object(bot, 'intelligence_text_target', side_effect=lambda _im, labels, _box:
                                (540, 1245) if labels == ('采集',) else (825, 2240)),
                   patch.object(bot, 'task_tap') as tap,
@@ -91,12 +169,31 @@ class GatherTest(unittest.TestCase):
                 bot.run_gather('test', *([None] * 4), resources=('iron', 'coal', 'wood', 'meat'))
             self.assertEqual(queue.call_count, len(queues))
             searched = [call.args[2] for call in prepare.call_args_list]
-            self.assertEqual(searched, expected or (['meat'] if len(queues) > 1 else []))
+            self.assertEqual(searched, expected or (['iron'] if len(queues) > 1 else []))
             self.assertEqual([call.args[1:] for call in tap.call_args_list].count((540, 2240)),
-                             2 if len(queues) == 7 else (1 if len(queues) == 3 else 0))
+                             len(expected))
             self.assertEqual([call.args[1:] for call in tap.call_args_list].count((825, 2240)),
                              len(expected))
             back.assert_not_called()
+
+    def test_ordered_steps_keep_duplicate_resources_and_individual_levels(self):
+        frame = object()
+        steps = [('wood', 7), ('iron', 8), ('wood', 3), ('meat', 8), ('coal', 6), ('iron', 2)]
+        with (patch.object(bot, 'enter_wilderness', return_value=frame),
+              patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'town_button', return_value=True),
+              patch.object(bot, 'intelligence_queue_full', return_value=False),
+              patch.object(bot, 'task_tap'),
+              patch.object(bot, 'prepare_gather_search', return_value=frame) as prepare,
+              patch.object(bot, 'search_gather_target', return_value=(frame, (1, 2), None)),
+              patch.object(bot, 'gather_notice', return_value=None),
+              patch.object(bot, 'gather_search_page', return_value=False),
+              patch.object(bot, 'intelligence_text_target', return_value=(3, 4)),
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertIs(bot.run_gather('test', *([None] * 4), steps=steps, full_only=False), frame)
+        self.assertEqual([call.args[2:] for call in prepare.call_args_list], steps)
+        self.assertTrue(all(c.kwargs == {'full_only': False} for c in prepare.call_args_list))
+        self.assertEqual([bot.parse_gather_step(f'{resource}:{level}') for resource, level in steps], steps)
 
     def test_only_selected_resources_are_searched(self):
         frame = self.frame('gather-live-start')
@@ -106,6 +203,7 @@ class GatherTest(unittest.TestCase):
               patch.object(bot, 'prepare_gather_search', return_value=frame) as prepare,
               patch.object(bot, 'gather_search_page', return_value=False),
               patch.object(bot, 'gather_notice', return_value=None),
+              patch.object(bot, 'gather_action_target', return_value=(540, 1245)),
               patch.object(bot, 'intelligence_text_target', return_value=(825, 2240)),
               patch.object(bot, 'task_tap'),
               patch.object(bot, 'task_screen', return_value=frame),
@@ -117,7 +215,7 @@ class GatherTest(unittest.TestCase):
     def test_invalid_resources_fail_before_clicking(self):
         for resources in ((), ('gold',)):
             with (patch.object(bot, 'task_screen') as screen,
-                  self.assertRaisesRegex(ValueError, '至少要勾选一项')):
+                  self.assertRaisesRegex(ValueError, '至少要选择一项')):
                 bot.run_gather('test', *([None] * 4), resources=resources)
             screen.assert_not_called()
 
@@ -160,7 +258,7 @@ class GatherTest(unittest.TestCase):
               patch.object(bot, 'task_tap') as tap,
               patch.object(bot, 'gather_notice', side_effect=['no_target', 'no_target', None]),
               patch.object(bot, 'gather_search_page', return_value=False),
-              patch.object(bot, 'intelligence_text_target', return_value=(540, 1245)),
+              patch.object(bot, 'gather_action_target', return_value=(540, 1245)),
               patch.object(bot, 'set_gather_level', return_value=frame) as adjust,
               contextlib.redirect_stdout(io.StringIO())):
             result = bot.search_gather_target('test', frame, 'coal', 4)
@@ -223,7 +321,7 @@ class GatherTest(unittest.TestCase):
               patch.object(bot, 'intelligence_queue_full', return_value=False),
               patch.object(bot, 'task_tap'),
               patch.object(bot, 'gather_notice', return_value=None),
-              patch.object(bot, 'intelligence_text_target', return_value=(540, 1245))):
+              patch.object(bot, 'gather_action_target', return_value=(540, 1245))):
             self.assertTrue(bot.gather_search_page(frame))
             self.assertEqual(bot.search_gather_target('test', frame, 'wood', 1),
                              (frame, (540, 1245), None))
@@ -297,9 +395,10 @@ class GatherTest(unittest.TestCase):
             argv = ['help_bot.py', '--device', 'test', '--gather', '--resources', 'wood', 'iron',
                     '--wood-level', '3', '--iron-level', '6']
             if intelligence:
-                argv.append('--intelligence')
+                argv += ['--intelligence', '--no-gather-full-only', '--gather-steps', 'wood:7', 'iron:8', 'wood:3']
             with (patch('sys.argv', argv),
-                  patch.object(bot, 'emulator_device', return_value=True),
+                  patch.object(bot, 'adb', return_value=b'device'),
+                  patch.object(bot, 'avd_key', return_value='serial:test'),
                   patch.object(bot, 'return_to_city', return_value=True),
                   patch.object(bot, 'run_schedule') as schedule):
                 bot.main()
@@ -311,6 +410,9 @@ class GatherTest(unittest.TestCase):
                 for task in tasks.values():
                     task()
             self.assertEqual(calls, list(tasks))
+            if intelligence:
+                self.assertEqual(gather.call_args.kwargs['steps'], [('wood', 7), ('iron', 8), ('wood', 3)])
+            self.assertEqual(gather.call_args.kwargs['full_only'], not intelligence)
             self.assertEqual(gather.call_args.kwargs['resources'], ['wood', 'iron'])
             self.assertEqual(gather.call_args.kwargs['levels'], {'wood': 3, 'iron': 6})
 

@@ -7,6 +7,7 @@ GameBot.*.exe
 __pycache__/
 *.pyc
 configs/
+device_notes/
 logs/
 .DS_Store
 .tools/platform-tools/*.exe

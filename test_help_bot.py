@@ -486,6 +486,7 @@ class CityTaskTest(unittest.TestCase):
               patch.object(help_bot, "task_page", side_effect=lambda _image, _templates, name, *_args: name == "drawer-open"),
               patch.object(help_bot, "find_green", return_value=(0, 0, 0)) as find_label,
               patch.object(help_bot, "recognize_text", return_value=[("高级招募", (10, 100, 150, 35))]),
+              patch.object(help_bot, "countdown", return_value=60),
               patch.object(help_bot, "swipe_drawer", return_value=image),
               patch.object(help_bot, "task_screen", return_value=image),
               patch.object(help_bot, "task_tap"),
@@ -681,8 +682,7 @@ class CityTaskTest(unittest.TestCase):
         for name, expected in (("warehouse-tree-drawer", True),
                                ("warehouse-after-drawer", False)):
             image = Image.open(root / "artifacts" / f"{name}.png").convert("RGB")
-            score, _, _ = help_bot.find_white(image, template, range(240, 351, 5),
-                                              range(650, 1360, 5))
+            score, _, _ = help_bot.reward_row(image, template, "仓库补给")
             self.assertEqual(score >= 0.85, expected)
 
     def test_tree_above_threshold_collects_and_returns_to_city(self):
@@ -705,6 +705,7 @@ class CityTaskTest(unittest.TestCase):
               patch.object(help_bot, "tree_drawer_amount", side_effect=[
                   (4984, 1200), (4984, 1200), (0, 1200), (0, 1200)]),
               patch.object(help_bot, "collect_crystals", return_value=island_after),
+              patch.object(help_bot.island_help, "run", return_value=island_after) as help_islands,
               patch.object(help_bot, "game_foreground", return_value=True),
               patch.object(help_bot, "adb"),
               patch.object(help_bot, "task_tap", side_effect=lambda _serial, x, y: actions.append((x, y))),
@@ -717,6 +718,8 @@ class CityTaskTest(unittest.TestCase):
 
         self.assertIn((608, 1195), actions)
         self.assertIn((60, 190), actions)
+        help_islands.assert_called_once()
+        self.assertEqual(help_islands.call_args.args[:3], (help_bot, "test-device", island_after))
 
     def test_warehouse_and_dawn_reward_are_claimed(self):
         root = Path(__file__).resolve().parent

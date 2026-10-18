@@ -69,6 +69,8 @@ import sys
 import ctypes
 from pathlib import Path
 import cv2, numpy, onnxruntime
+import certifi, ssl
+from app_updates import update_ssl_context
 from PIL import Image, ImageDraw, ImageFont
 from ocr_backend import recognize_text
 from platform_support import resolve_adb
@@ -77,6 +79,10 @@ root = Path(sys.argv[1]).resolve()
 assert Path(sys.prefix).resolve() == root / 'runtime/python', sys.prefix
 assert sys.flags.isolated and sys.flags.ignore_environment
 assert all(Path(p).resolve().is_relative_to(root) for p in sys.path if p), sys.path
+assert Path(certifi.where()).resolve().is_relative_to(root), certifi.where()
+context = update_ssl_context()
+assert context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
+assert context.cert_store_stats()['x509_ca'] > 0
 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
 kernel.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
 kernel.GetModuleHandleW.restype = ctypes.c_void_p
@@ -209,7 +215,7 @@ def finish_build(destination):
     verify(destination)
     # These are self-check output inside a freshly created build directory.
     # Resolve every delete target and restrict it to this build before removing it.
-    for name in (".desktop-cache", "configs", "logs", "artifacts", "__pycache__"):
+    for name in (".desktop-cache", "configs", "device_notes", "logs", "artifacts", "__pycache__"):
         state = (destination / name).resolve()
         if not state.is_relative_to(destination.resolve()) or state == destination.resolve():
             raise RuntimeError(f"Unsafe build cleanup target: {state}")
@@ -221,7 +227,9 @@ def finish_build(destination):
                 if state.exists():
                     shutil.rmtree(state, onexc=missing_is_ok)
                 break
-            except PermissionError:
+            except OSError as error:
+                if not isinstance(error, PermissionError) and getattr(error, "winerror", None) != 145:
+                    raise
                 # WebView2 can finish writing cache files shortly after EXE exit.
                 if attempt == 5:
                     raise
@@ -235,7 +243,7 @@ def finish_build(destination):
         for source in sorted(destination.rglob("*")):
             relative = source.relative_to(destination)
             if (source.is_file() and relative.parts[0] not in
-                    {".desktop-cache", "configs", "logs", "artifacts"}
+                    {".desktop-cache", "configs", "device_notes", "logs", "artifacts"}
                     and "__pycache__" not in relative.parts
                     and source.suffix != ".pyc"):
                 output.write(source, Path(release_name) / relative)

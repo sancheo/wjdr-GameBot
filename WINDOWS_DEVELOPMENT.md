@@ -59,5 +59,6 @@ Windows 识别流程将图片转换为 RGB、宽高各放大两倍，再以 PNG 
 | `device_lease.py` | 系统级模拟器互斥，防止多个任务进程同时控制同一模拟器。 |
 | `task_status.py` | 任务状态消息校验。 |
 | `image_matching.py` | 模板缓存、平均绝对差和 Dice 匹配；保持既有阈值与同分时的坐标顺序。 |
+| `screen_geometry.py` | 竖屏截图的有效区域、页面锚点和逻辑画布映射；所有点击、滑动通过同一映射返回原始设备坐标，按设备隔离状态。 |
 | `help_bot.py` | 任务入口与兼容接口。 |
 | `ocr_backend.py` | Windows RapidOCR 与 macOS Vision 的统一识别接口。 |

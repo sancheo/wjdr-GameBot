@@ -14,7 +14,13 @@ LOG_NAME = re.compile(r"^\d{8}-\d{6}-\d{6}-(?:runtime|exception)\.log$")
 EXCEPTION_LINE = re.compile(r"(?:^|\s)(?:\w+\.)*\w*(?:Error|Exception):")
 
 
+def is_retry(line):
+    return bool(re.search(r"(?:首次异常|第 \d+ 次重试异常)[:：].*；\d+ 秒后.*重试", line))
+
+
 def is_error(line):
+    if is_retry(line):
+        return False
     return bool("\u26a0" in line or "已停止：" in line or "任务异常：" in line
                 or re.search(r"异常[:：]|失败[:：]", line)
                 or "Traceback (most recent call last):" in line or EXCEPTION_LINE.search(line))
@@ -63,6 +69,33 @@ def _remove_empty(path):
 
 
 class SessionLogs:
+    @staticmethod
+    def latest_entries(root, key):
+        """Read the latest session, including its files on either side of midnight."""
+        base = Path(root) / "logs"
+        folder = base / emulator_directory(key)
+        if not folder.is_dir() or not safe_directory(folder, base):
+            return []
+        files = [path for path in folder.glob("*/*-runtime.log")
+                 if LOG_NAME.fullmatch(path.name) and safe_directory(path.parent, base)
+                 and safe_directory(path, base) and path.is_file()]
+        if not files:
+            return []
+        name = max(path.name for path in files)
+        entries = []
+        traceback = False
+        for path in sorted(path for path in files if path.name == name):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                traceback = traceback or "Traceback (most recent call last):" in line
+                entries.append((line, traceback or is_error(line)))
+                if EXCEPTION_LINE.search(line):
+                    traceback = False
+        return entries
+
     def __init__(self, root, key, started=None):
         self.root = Path(root)
         self.key = key

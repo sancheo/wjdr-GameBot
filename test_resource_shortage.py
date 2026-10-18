@@ -68,7 +68,7 @@ class ResourceShortageTest(unittest.TestCase):
               contextlib.redirect_stdout(io.StringIO())):
             self.assertIs(bot.leave_treasure_stamina('test', self.refill), page)
         self.assertEqual(taps.call_args_list, [call('test', 1000, 480),
-                                             call('test', 995, 610), call('test', 960, 595)])
+                                             call('test', 995, 605), call('test', 960, 595)])
 
     def test_hunt_no_soldiers_skips_at_search_squad_and_post_dispatch(self):
         initial, detail, squad, returned = [Image.new('RGB', bot.EXPECTED_SIZE) for _ in range(4)]

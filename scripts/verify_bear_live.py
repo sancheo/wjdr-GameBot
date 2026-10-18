@@ -15,10 +15,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", required=True)
     parser.add_argument("--flow", choices=("drive", "follow"), default="drive",
-                        help="Label the collected screenshots by rally flow")
+                        help="Dispatch as a driver (keep heroes) or follower (validate heroes)")
     parser.add_argument("--case", choices=("existing", "wrong-first", "wrong-rear", "wrong-rear-third"),
                         default="existing")
-    parser.add_argument("--dispatch", action="store_true", help="Actually issue one rally after validating heroes")
+    parser.add_argument("--dispatch", action="store_true", help="Actually issue one rally using the selected flow")
     args = parser.parse_args()
     bot.configure_stdio()
     original = bot.task_screen
@@ -36,6 +36,12 @@ def main():
     bot.TOWN_TEMPLATE = bot.open_template(bot.ROOT / "assets/emulator-town-button.png").convert("L")
     with DeviceLease(args.device, avd_key(args.device)):
         image = capture(args.device)
+        if args.flow == "follow" and args.dispatch and args.case == "existing" and bear.war_page(bot, image):
+            image, issued = bear.follow_rally(bot, args.device, image)
+            print("Rally joined:", issued, flush=True)
+            if not issued:
+                raise RuntimeError("当前未能加入熊队伍，检查可加入队伍、体力和士兵状态")
+            return
         if bear.rally_page(bot, image):
             bot.task_tap(args.device, 540, 1538)
             image = bear.wait_for(bot, args.device, lambda frame: bear.squad_page(bot, frame), "未打开出征界面")
@@ -44,17 +50,20 @@ def main():
         if args.case == "wrong-first":
             if bear.slots(bot, image)[0]:
                 image = bear.remove(bot, args.device, image, 0)
-            bot.task_tap(args.device, 254, 705)
+            dy, _ = bear.squad_layout(bot, image)
+            bot.task_tap(args.device, 254, 705 + dy)
             image = bear.wait_for(bot, args.device, lambda frame: bear.selection_page(bot, frame), "未打开英雄选择")
             image = bear.fill_selection(bot, args.device, image, need_first=False)
-            if bear.hero_name(bot, image.crop(bear.FACE_BOX)) is not None:
+            dy, _ = bear.squad_layout(bot, image)
+            if bear.hero_name(bot, image.crop(bear.shifted(bear.FACE_BOX, dy=dy))) is not None:
                 raise RuntimeError("未构造首英雄不符合条件的采样场景")
         elif args.case in ("wrong-rear", "wrong-rear-third"):
             slot = 2 if args.case == "wrong-rear-third" else 1
-            image = bear.prepare_squad(bot, args.device, image)
+            image = bear.prepare_squad(bot, args.device, image, flow=args.flow)
             if bear.slots(bot, image)[slot]:
                 image = bear.remove(bot, args.device, image, slot)
-            bot.task_tap(args.device, 254 + bear.SLOT_OFFSETS[slot], 705)
+            dy, _ = bear.squad_layout(bot, image)
+            bot.task_tap(args.device, 254 + bear.SLOT_OFFSETS[slot], 705 + dy)
             image = bear.wait_for(bot, args.device, lambda frame: bear.selection_page(bot, frame), "未打开后排英雄选择")
             image, found = bear.choose(bot, args.device, image, first=True)
             if not found:
@@ -65,14 +74,17 @@ def main():
                                   "未确认后排槽指派完成")
             image = bear.close_selection(bot, args.device, image)
         image.save(f"{prefix}-before.png")
-        image = bear.prepare_squad(bot, args.device, image)
+        image = bear.prepare_squad(bot, args.device, image, flow=args.flow)
         image.save(f"{prefix}-prepared.png")
-        occupied = bear.slots(bot, image)
-        names = [bear.hero_name(bot, image.crop(bear.shifted(bear.FACE_BOX, dx))) if occupied[i] else None
-                 for i, dx in enumerate(bear.SLOT_OFFSETS)]
-        print("Validated squad:", occupied, names, flush=True)
+        dy, occupied = bear.squad_layout(bot, image)
+        if args.flow == "follow":
+            names = [bear.hero_name(bot, image.crop(bear.shifted(bear.FACE_BOX, dx, dy))) if occupied[i] else None
+                     for i, dx in enumerate(bear.SLOT_OFFSETS)]
+            print("Validated follower squad:", occupied, names, flush=True)
+        else:
+            print("Driver squad kept:", occupied, flush=True)
         if args.dispatch:
-            image, issued = bear.dispatch(bot, args.device, image)
+            image, issued = bear.dispatch(bot, args.device, image, flow=args.flow)
             image.save(f"{prefix}-dispatched.png")
             print("Rally dispatched:", issued, flush=True)
             if not issued:

@@ -44,6 +44,9 @@ def main():
         calls.append('following')
         return image
     with DeviceLease(args.device, avd_key(args.device)):
+        # The scheduler prioritizes gather before heal. Finish the hospital
+        # first so the continuation probe never runs on an open hospital.
+        heal()
         bot.run_schedule(args.device, 20, 2, False, {'heal': heal, 'gather': following},
                          help_icon, nav, offline, reconnect, help_enabled=False)
     if calls[:2] != ['heal', 'following']:

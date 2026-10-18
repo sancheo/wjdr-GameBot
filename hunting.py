@@ -1,6 +1,7 @@
 """Search calibrated monster categories, confirm levels, and dispatch once per kind."""
 
 import re
+from PIL import ImageFilter
 
 MONSTERS = {"beast": ("野兽", 30), "polar_beast": ("冰原巨兽", 6)}
 MINIMUM_LEVELS = {"beast": 1, "polar_beast": 2}
@@ -44,12 +45,35 @@ def minimum_level(bot, image):
     return bot.difference(image.crop((65, 1960, 145, 2040)).convert("L"), template) <= 15
 
 
+def category_target(bot, image, label):
+    if not bot.gather_search_page(image):
+        return None
+    box = (0, 1790, 1080, 1880)
+    target = bot.intelligence_text_target(image, (label,), box)
+    if target is not None:
+        return target
+    # Width normalization softens the small outlined category lettering on
+    # phones. Sharpen only this verified search strip; still require the exact
+    # full label instead of accepting similar monster names.
+    strip = image.crop(box).filter(ImageFilter.UnsharpMask(radius=1, percent=180, threshold=3))
+    for text, (x, y, width, height) in bot.recognize_text(strip):
+        if re.sub(r"\s+", "", text) == label:
+            return round(x + width / 2), round(box[1] + y + height / 2)
+    return None
+
+
 def prepare(bot, serial, image, kind, configured_level):
     label, maximum = MONSTERS[kind]
     for _ in range(5):
-        if not bot.gather_search_page(image):
-            raise RuntimeError("未确认打怪搜索界面")
-        target = bot.intelligence_text_target(image, (label,), (0, 1790, 1080, 1880))
+        # Opening the drawer or scrolling its categories can outlast the
+        # first screenshot. Wait without tapping or swiping again.
+        for attempt in range(6):
+            if bot.gather_search_page(image):
+                break
+            if attempt == 5:
+                raise RuntimeError("未确认打怪搜索界面")
+            image = bot.task_screen(serial)
+        target = category_target(bot, image, label)
         if target is not None and 110 <= target[0] <= 970:
             bot.task_tap(serial, *target)
             image = bot.task_screen(serial)

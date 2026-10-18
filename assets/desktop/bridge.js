@@ -6,7 +6,7 @@ if (window.chrome && window.chrome.webview) {
   const pending = new Map();
   let sequence = 0;
   const api = {};
-  for (const method of ["get_state", "refresh_devices", "select_device", "launch_emulator", "restart_emulator", "update_config", "start", "stop", "retry_task", "check_updates", "download_update", "install_update"]) {
+  for (const method of ["get_state", "refresh_devices", "select_device", "set_device_note", "update_config", "start", "stop", "retry_task", "open_screenshot", "check_updates", "download_update", "cancel_update_download", "install_update"]) {
     api[method] = (...args) => new Promise((resolve, reject) => {
       const id = ++sequence;
       const timeout = setTimeout(() => {

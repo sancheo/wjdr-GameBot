@@ -146,7 +146,8 @@ class BountyTest(unittest.TestCase):
 
     def test_cli_keeps_bounty_state_outside_refresh_timers(self):
         with (patch('sys.argv', ['help_bot.py', '--device', 'test', '--intelligence', '--bounty']),
-              patch.object(bot, 'emulator_device', return_value=True),
+              patch.object(bot, 'adb', return_value=b'device'),
+              patch.object(bot, 'avd_key', return_value='serial:test'),
               patch.object(bot, 'return_to_city', return_value=True),
               patch.object(bot, 'run_schedule') as schedule):
             bot.main()

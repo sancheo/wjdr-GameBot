@@ -51,13 +51,13 @@ class ExceptionScreenshotTest(unittest.TestCase):
         paths = list((self.root / 'artifacts' / bot.DIAGNOSTIC_SCREENSHOT_DIR).glob('*/*/exception-*.png'))
         self.assertEqual(len(paths), 1)
         failures = [line for line in output.getvalue().splitlines() if '异常：页面异常' in line]
-        self.assertEqual(len(failures), 4)
+        self.assertEqual(len(failures), 3)
         self.assertNotIn('失败截图：', failures[0])
         self.assertNotIn('失败截图：', failures[1])
         self.assertNotIn('失败截图：', failures[2])
         self.assertNotIn('同一异常', output.getvalue())
         for path in paths:
-            self.assertIn(str(path), failures[3])
+            self.assertIn(str(path), raised.exception.diagnostic_screenshot)
             with Image.open(path) as saved:
                 # A wrong screen size is still useful evidence and keeps its color.
                 self.assertEqual(saved.size, self.frame.size)
@@ -65,7 +65,8 @@ class ExceptionScreenshotTest(unittest.TestCase):
         with patch.object(bot, 'color_screenshot') as capture_again:
             diagnostic = bot.exception_screenshot('emulator-test', raised.exception)
         capture_again.assert_not_called()
-        self.assertIn(diagnostic, failures[-1])
+        self.assertEqual(diagnostic, raised.exception.diagnostic_screenshot)
+        self.assertNotIn('失败截图：', output.getvalue())
 
     def test_bounty_first_failure_saves_scene_and_context_before_recovery(self):
         events, state = [], {}
@@ -119,12 +120,13 @@ class ExceptionScreenshotTest(unittest.TestCase):
                 patch.object(bot.time, 'sleep') as wait,
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
-                with self.assertRaisesRegex(bot.RetriesExhausted, '原始异常'):
+                with self.assertRaisesRegex(bot.RetriesExhausted, '原始异常') as raised:
                     bot.retry_once('仓库补给', lambda: (_ for _ in ()).throw(RuntimeError('原始异常')),
                                    'emulator-test', None, None)
                 self.assertEqual(wait.call_count, 3)
-                self.assertEqual(output.getvalue().count('失败截图保存失败：'), 1)
-                self.assertIn(type(failure).__name__, output.getvalue())
+                diagnostic = raised.exception.diagnostic_screenshot
+                self.assertEqual(diagnostic.count('失败截图保存失败：'), 1)
+                self.assertIn(type(failure).__name__, diagnostic)
 
     def test_unwritable_directory_reports_capture_failure(self):
         (self.root / 'artifacts').write_text('not a directory', encoding='utf-8')
@@ -164,14 +166,14 @@ class ExceptionScreenshotTest(unittest.TestCase):
               patch.object(bot, 'maybe_cleanup_diagnostic_screenshots', side_effect=RuntimeError('清理异常')),
               patch.object(bot.time, 'sleep'),
               contextlib.redirect_stdout(io.StringIO()) as output):
-            with self.assertRaisesRegex(bot.RetriesExhausted, '原始异常'):
+            with self.assertRaisesRegex(bot.RetriesExhausted, '原始异常') as raised:
                 bot.retry_once('自动练兵', lambda: (_ for _ in ()).throw(ValueError('原始异常')),
                                'emulator-test', None, None)
         paths = list((self.root / 'artifacts' / bot.DIAGNOSTIC_SCREENSHOT_DIR).glob('*/*/exception-*.png'))
         self.assertEqual(len(paths), 1)
-        self.assertIn('故障截图清理失败：RuntimeError: 清理异常', output.getvalue())
+        self.assertIn('故障截图清理失败：RuntimeError: 清理异常', raised.exception.diagnostic_screenshot)
         for path in paths:
-            self.assertIn(str(path), output.getvalue())
+            self.assertIn(str(path), raised.exception.diagnostic_screenshot)
 
     def test_offline_interruptions_never_accumulate_to_a_screenshot(self):
         original = RuntimeError('任务中断')
@@ -199,11 +201,12 @@ class ExceptionScreenshotTest(unittest.TestCase):
 
         with (patch.object(bot.sys, 'argv', ['help_bot.py', '--device', 'emulator-test', '--forever']),
               patch.object(bot.Image, 'open', return_value=self.frame),
-              patch.object(bot, 'emulator_device', return_value=True),
+              patch.object(bot, 'adb', return_value=b'device'),
+              patch.object(bot, 'avd_key', return_value='serial:emulator-test'),
               patch.object(bot, 'return_to_city', return_value=True),
               patch.object(bot, 'run_schedule', side_effect=exhausted),
               patch.object(bot, 'color_screenshot', return_value=self.frame) as capture,
-              contextlib.redirect_stdout(io.StringIO()),
+              contextlib.redirect_stdout(io.StringIO()) as output,
               contextlib.redirect_stderr(io.StringIO()) as errors):
             with self.assertRaises(SystemExit) as raised:
                 bot.main()
@@ -213,6 +216,7 @@ class ExceptionScreenshotTest(unittest.TestCase):
         reason = desktop.exception_reason(errors.getvalue().splitlines(), 1)
         self.assertIn('意外错误', reason)
         self.assertIn(str(path), reason)
+        self.assertEqual((output.getvalue() + errors.getvalue()).count(str(path)), 1)
 
     def test_first_startup_asset_failure_does_not_capture(self):
         with (patch.object(bot.sys, 'argv', ['help_bot.py', '--device', 'emulator-test']),
@@ -238,10 +242,10 @@ class ExceptionScreenshotTest(unittest.TestCase):
               patch.object(bot, 'forced_offline', return_value=False),
               patch.object(bot.time, 'sleep'),
               contextlib.redirect_stdout(io.StringIO()) as output):
-            with self.assertRaises(bot.RetriesExhausted):
+            with self.assertRaises(bot.RetriesExhausted) as raised:
                 bot.retry_once('练兵', operation, 'emulator-test', None, None)
         capture.assert_called_once_with('emulator-test')
-        self.assertIn('失败截图：', output.getvalue())
+        self.assertIn('失败截图：', raised.exception.diagnostic_screenshot)
 
     def test_separate_retry_cycles_do_not_accumulate_failures(self):
         with (patch.object(bot, 'color_screenshot') as capture,
@@ -272,7 +276,8 @@ class ExceptionScreenshotTest(unittest.TestCase):
     def test_keyboard_interrupt_does_not_capture_failure(self):
         with (patch.object(bot.sys, 'argv', ['help_bot.py', '--device', 'emulator-test']),
               patch.object(bot.Image, 'open', return_value=self.frame),
-              patch.object(bot, 'emulator_device', side_effect=KeyboardInterrupt),
+              patch.object(bot, 'adb', side_effect=KeyboardInterrupt),
+              patch.object(bot, 'avd_key', return_value='serial:emulator-test'),
               patch.object(bot, 'color_screenshot') as capture,
               contextlib.redirect_stdout(io.StringIO()) as output):
             bot.main()

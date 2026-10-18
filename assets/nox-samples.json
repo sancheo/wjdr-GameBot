@@ -1,0 +1,1059 @@
+{
+  "alliance-title": {
+    "native": "tests/fixtures/nox/20261017-235003-183736/tour-donate-005-native.png",
+    "normalized": "tests/fixtures/nox/20261017-235003-183736/tour-donate-005.png",
+    "box": [
+      135,
+      150,
+      255,
+      225
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "city-nav": {
+    "native": "tests/fixtures/nox/tour-donate-002-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-002.png",
+    "box": [
+      70,
+      2195,
+      150,
+      2275
+    ]
+  },
+  "pet-button": {
+    "native": "tests/fixtures/nox/tour-donate-002-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-002.png",
+    "box": [
+      960,
+      1680,
+      1030,
+      1750
+    ]
+  },
+  "task-rewards-entry": {
+    "native": "tests/fixtures/nox/tour-donate-002-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-002.png",
+    "box": [
+      15,
+      1985,
+      95,
+      2040
+    ]
+  },
+  "drawer-open": {
+    "native": "tests/fixtures/nox/tour-donate-003-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-003.png",
+    "box": [
+      678,
+      1020,
+      715,
+      1170
+    ]
+  },
+  "tech-title": {
+    "native": "tests/fixtures/nox/tour-donate-006-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-006.png",
+    "box": [
+      135,
+      150,
+      360,
+      225
+    ]
+  },
+  "thumb": {
+    "native": "tests/fixtures/nox/tour-donate-006-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-006.png",
+    "box": [
+      443,
+      1584,
+      504,
+      1647
+    ]
+  },
+  "bear-hero-close": {
+    "native": "tests/fixtures/nox/tour-donate-007-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-007.png",
+    "box": [
+      928,
+      546,
+      987,
+      605
+    ]
+  },
+  "resource-more-close": {
+    "native": "tests/fixtures/nox/tour-donate-007-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-007.png",
+    "box": [
+      932,
+      544,
+      988,
+      604
+    ]
+  },
+  "stronghold-rules-close": {
+    "native": "tests/fixtures/nox/tour-donate-007-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-007.png",
+    "box": [
+      927,
+      543,
+      987,
+      608
+    ]
+  },
+  "tech-detail": {
+    "native": "tests/fixtures/nox/tour-donate-007-native.png",
+    "normalized": "tests/fixtures/nox/tour-donate-007.png",
+    "box": [
+      920,
+      534,
+      1005,
+      624
+    ]
+  },
+  "treasure-dispatch-close": {
+    "native": "tests/fixtures/nox/treasure-pets-insufficient-native.png",
+    "normalized": "tests/fixtures/nox/treasure-pets-insufficient.png",
+    "box": [
+      970,
+      580,
+      1020,
+      630
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "dawn-row-title": {
+    "native": "tests/fixtures/nox/tour-recruit_epic-008-native.png",
+    "normalized": "tests/fixtures/nox/tour-recruit_epic-008.png",
+    "box": [
+      270,
+      1495,
+      390,
+      1545
+    ]
+  },
+  "help-icon": {
+    "native": "tests/fixtures/nox/tour-stamina-016-native.png",
+    "normalized": "tests/fixtures/nox/tour-stamina-016.png",
+    "box": [
+      748,
+      2070,
+      830,
+      2155
+    ]
+  },
+  "dawn-reward-title": {
+    "native": "tests/fixtures/nox/tour-explore-038-native.png",
+    "normalized": "tests/fixtures/nox/tour-explore-038.png",
+    "box": [
+      380,
+      680,
+      700,
+      790
+    ]
+  },
+  "explore-idle-button": {
+    "native": "tests/fixtures/nox/tour-explore-039-native.png",
+    "normalized": "tests/fixtures/nox/tour-explore-039.png",
+    "box": [
+      835,
+      1675,
+      1000,
+      1750
+    ]
+  },
+  "warehouse-title": {
+    "native": "tests/fixtures/nox/20261017-235003-183736/tour-recruit_epic-021-native.png",
+    "normalized": "tests/fixtures/nox/20261017-235003-183736/tour-recruit_epic-021.png",
+    "box": [
+      270,
+      1386,
+      400,
+      1424
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "secret-choice-title": {
+    "native": "tests/fixtures/nox/20261017-235622-645578/tour-tree-017-native.png",
+    "normalized": "tests/fixtures/nox/20261017-235622-645578/tour-tree-017.png",
+    "box": [
+      345,
+      230,
+      840,
+      320
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "secret-choice-close": {
+    "native": "tests/fixtures/nox/20261017-235622-645578/tour-tree-017-native.png",
+    "normalized": "tests/fixtures/nox/20261017-235622-645578/tour-tree-017.png",
+    "box": [
+      965,
+      230,
+      1045,
+      315
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "town-button": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-tree-005-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-tree-005.png",
+    "box": [
+      925,
+      2275,
+      1020,
+      2330
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "treasure-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-016-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-016.png",
+    "box": [
+      140,
+      165,
+      345,
+      225
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "reconnect-welcome-close": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-017-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-017.png",
+    "box": [
+      970,
+      475,
+      1025,
+      535
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "treasure-alliance-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-017-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-017.png",
+    "box": [
+      400,
+      470,
+      680,
+      550
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "explore-reward": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-018-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-treasure-018.png",
+    "box": [
+      395,
+      705,
+      660,
+      790
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "explore-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-explore-023-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-explore-023.png",
+    "box": [
+      140,
+      150,
+      260,
+      225
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "explore-income": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-explore-024-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-explore-024.png",
+    "box": [
+      440,
+      666,
+      660,
+      731
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "training-upgrade-arrow": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-train-035-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-train-035.png",
+    "box": [
+      860,
+      1226,
+      910,
+      1286
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "pet-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-pet_companion-052-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-pet_companion-052.png",
+    "box": [
+      440,
+      480,
+      640,
+      535
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "task-rewards-daily-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-task_rewards-068-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-task_rewards-068.png",
+    "box": [
+      435,
+      435,
+      645,
+      500
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "gather-plus-disabled": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-091-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-091.png",
+    "box": [
+      690,
+      1960,
+      770,
+      2040
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "gather-search": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-091-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-091.png",
+    "box": [
+      485,
+      2200,
+      605,
+      2285
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "hunt-minus-disabled": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-093-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-093.png",
+    "box": [
+      65,
+      1960,
+      145,
+      2040
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-war-entry": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-094-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-094.png",
+    "box": [
+      947,
+      1196,
+      1027,
+      1274
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-rally-start": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-101-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-101.png",
+    "box": [
+      345,
+      1490,
+      735,
+      1570
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-rally-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-101-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-hunt-101.png",
+    "box": [
+      435,
+      850,
+      655,
+      914
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-help-entry": {
+    "native": "tests/fixtures/nox/20261017-235003-183736/tour-donate-005-native.png",
+    "normalized": "tests/fixtures/nox/20261017-235003-183736/tour-donate-005.png",
+    "box": [
+      775,
+      1705,
+      965,
+      1780
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "free-label": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-tree-003-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-tree-003.png",
+    "box": [
+      278,
+      1155,
+      393,
+      1188
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "treasure-chest-orange": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-explore-021-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-explore-021.png",
+    "box": [
+      283,
+      550,
+      483,
+      750
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "training-shield-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-train-035-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-train-035.png",
+    "box": [
+      400,
+      140,
+      680,
+      230
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "training-archer-title": {
+    "native": "tests/fixtures/nox/20261018-000159-489377/tour-train-045-native.png",
+    "normalized": "tests/fixtures/nox/20261018-000159-489377/tour-train-045.png",
+    "box": [
+      400,
+      140,
+      680,
+      230
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "recruit-title": {
+    "native": "tests/fixtures/nox/20261018-002934-175024/tour-recruit_advanced-049-native.png",
+    "normalized": "tests/fixtures/nox/20261018-002934-175024/tour-recruit_advanced-049.png",
+    "box": [
+      885,
+      265,
+      1050,
+      440
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "reward-title": {
+    "native": "tests/fixtures/nox/20261018-002934-175024/tour-recruit_advanced-051-native.png",
+    "normalized": "tests/fixtures/nox/20261018-002934-175024/tour-recruit_advanced-051.png",
+    "box": [
+      460,
+      590,
+      630,
+      720
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "intel-entry": {
+    "native": "tests/fixtures/nox/20261018-002934-175024/tour-intelligence-065-native.png",
+    "normalized": "tests/fixtures/nox/20261018-002934-175024/tour-intelligence-065.png",
+    "box": [
+      956,
+      1674,
+      1036,
+      1754
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "intel-title": {
+    "native": "tests/fixtures/nox/20261018-002934-175024/tour-intelligence-066-native.png",
+    "normalized": "tests/fixtures/nox/20261018-002934-175024/tour-intelligence-066.png",
+    "box": [
+      140,
+      166,
+      244,
+      218
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-help-title": {
+    "native": "tests/fixtures/nox/20261018-002934-175024/tour-help_clicker-075-native.png",
+    "normalized": "tests/fixtures/nox/20261018-002934-175024/tour-help_clicker-075.png",
+    "box": [
+      135,
+      150,
+      360,
+      225
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "intel-detail-go": {
+    "native": "tests/fixtures/nox/20261018-002934-175024/tour-intelligence-068-native.png",
+    "normalized": "tests/fixtures/nox/20261018-002934-175024/intel-detail-centered.png",
+    "box": [
+      425,
+      1630,
+      660,
+      1715
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-join": {
+    "native": "tests/fixtures/nox/20261018-004038-288735/tour-bear_follow-053-native.png",
+    "normalized": "tests/fixtures/nox/20261018-004038-288735/tour-bear_follow-053.png",
+    "box": [
+      918,
+      675,
+      1008,
+      770
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-war-title": {
+    "native": "tests/fixtures/nox/20261018-004038-288735/tour-bear_follow-053-native.png",
+    "normalized": "tests/fixtures/nox/20261018-004038-288735/tour-bear_follow-053.png",
+    "box": [
+      140,
+      165,
+      340,
+      225
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "intel-wolf": {
+    "native": "tests/fixtures/nox/20261018-010720-594935/tour-intelligence-005-native.png",
+    "normalized": "tests/fixtures/nox/20261018-010720-594935/tour-intelligence-005.png",
+    "box": [
+      389,
+      1499,
+      466,
+      1572
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "intel-bounty": {
+    "native": "tests/fixtures/nox/20261018-010720-594935/tour-intelligence-008-native.png",
+    "normalized": "tests/fixtures/nox/20261018-010720-594935/tour-intelligence-008.png",
+    "box": [
+      216,
+      896,
+      284,
+      973
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-hero-jasser-select-face": {
+    "native": "tests/fixtures/nox/20261018-010720-594935/tour-intelligence-011-native.png",
+    "normalized": "tests/fixtures/nox/20261018-010720-594935/tour-intelligence-011.png",
+    "box": [
+      63,
+      1859,
+      205,
+      1935
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-dispatch": {
+    "native": "tests/fixtures/nox/20261018-010720-594935/tour-gather-054-native.png",
+    "normalized": "tests/fixtures/nox/20261018-010720-594935/tour-gather-054.png",
+    "box": [
+      635,
+      2190,
+      1006,
+      2288
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "free-button": {
+    "native": "tests/fixtures/nox/20261018-010720-594935/tour-recruit_epic-076-native.png",
+    "normalized": "tests/fixtures/nox/20261018-010720-594935/tour-recruit_epic-076.png",
+    "box": [
+      218,
+      2208,
+      348,
+      2268
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "treasure-completed-title": {
+    "native": "tests/fixtures/nox/20261018-012220-305963/tour-treasure-035-native.png",
+    "normalized": "tests/fixtures/nox/20261018-012220-305963/treasure-completed-centered.png",
+    "box": [
+      410,
+      680,
+      670,
+      810
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "treasure-share": {
+    "native": "tests/fixtures/nox/treasure-alliance-share-main-1018-native.png",
+    "normalized": "tests/fixtures/nox/treasure-alliance-share-main-1018.png",
+    "box": [
+      810,
+      1720,
+      895,
+      1810
+    ],
+    "device": "127.0.0.1:62001",
+    "model": "SM-N976N"
+  },
+  "treasure-chest": {
+    "native": "tests/fixtures/nox/20261018-012649-271148/tour-treasure-018-native.png",
+    "normalized": "tests/fixtures/nox/20261018-012649-271148/tour-treasure-018.png",
+    "box": [
+      97,
+      1235,
+      295,
+      1417
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "treasure-dispatch-action": {
+    "native": "tests/fixtures/nox/20261018-012649-271148/tour-treasure-019-native.png",
+    "normalized": "tests/fixtures/nox/20261018-012649-271148/treasure-dispatch-centered.png",
+    "box": [
+      430,
+      1810,
+      650,
+      1885
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "training-upgrade-button": {
+    "native": "tests/fixtures/nox/20261018-013011-842605/tour-train-020-native.png",
+    "normalized": "tests/fixtures/nox/20261018-013011-842605/tour-train-020.png",
+    "box": [
+      928,
+      1245,
+      1028,
+      1348
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "training-upgrade-title": {
+    "native": "tests/fixtures/nox/20261018-013011-842605/tour-train-021-native.png",
+    "normalized": "tests/fixtures/nox/20261018-013011-842605/tour-train-021.png",
+    "box": [
+      350,
+      680,
+      730,
+      755
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "dawn-button": {
+    "native": "tests/fixtures/nox/20261018-131231-199977/tour-dawn-014-native.png",
+    "normalized": "tests/fixtures/nox/20261018-131231-199977/tour-dawn-014.png",
+    "box": [
+      360,
+      1580,
+      730,
+      1730
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "dawn-title": {
+    "native": "tests/fixtures/nox/20261018-131231-199977/tour-dawn-014-native.png",
+    "normalized": "tests/fixtures/nox/20261018-131231-199977/tour-dawn-014.png",
+    "box": [
+      405,
+      520,
+      660,
+      630
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "treasure-dispatch-title": {
+    "native": "tests/fixtures/nox/treasure-pets-insufficient-native.png",
+    "normalized": "tests/fixtures/nox/treasure-pets-insufficient.png",
+    "box": [
+      430,
+      580,
+      650,
+      640
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "bear-hero-plus": {
+    "native": "tests/fixtures/nox/20261018-131652-404691/tour-gather-076-native.png",
+    "normalized": "tests/fixtures/nox/20261018-131652-404691/tour-gather-076.png",
+    "box": [
+      780,
+      898,
+      865,
+      981
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "can-icon": {
+    "native": "tests/fixtures/nox/midday-state-1315-native.png",
+    "normalized": "tests/fixtures/nox/midday-world-scene.png",
+    "box": [
+      565,
+      910,
+      675,
+      1055
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N",
+    "coordinate_space": "scene"
+  },
+  "warehouse-front": {
+    "native": "tests/fixtures/nox/midday-state-1315-native.png",
+    "normalized": "tests/fixtures/nox/midday-world-scene.png",
+    "box": [
+      373,
+      1199,
+      533,
+      1319
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N",
+    "coordinate_space": "scene"
+  },
+  "warehouse-roof-vent": {
+    "native": "tests/fixtures/nox/midday-state-1315-native.png",
+    "normalized": "tests/fixtures/nox/midday-world-scene.png",
+    "box": [
+      617,
+      1128,
+      767,
+      1238
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N",
+    "coordinate_space": "scene"
+  },
+  "treasure-active-title": {
+    "native": "tests/fixtures/nox/20261018-131652-404691/tour-treasure-021-native.png",
+    "normalized": "tests/fixtures/nox/20261018-131652-404691/treasure-active-centered.png",
+    "box": [
+      460,
+      725,
+      620,
+      790
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "can-button": {
+    "native": "tests/fixtures/nox/20261018-132727-232061/tour-stamina-002-native.png",
+    "normalized": "tests/fixtures/nox/20261018-132727-232061/can-reward-centered.png",
+    "box": [
+      350,
+      1620,
+      735,
+      1760
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "can-modal-title": {
+    "native": "tests/fixtures/nox/20261018-132727-232061/tour-stamina-002-native.png",
+    "normalized": "tests/fixtures/nox/20261018-132727-232061/can-reward-centered.png",
+    "box": [
+      390,
+      1390,
+      690,
+      1480
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-chests-title": {
+    "native": "tests/fixtures/nox/alliance-chests-loot-tab-1018-native.png",
+    "normalized": "tests/fixtures/nox/alliance-chests-loot-tab-1018.png",
+    "box": [
+      140,
+      160,
+      340,
+      225
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-chests-incentive-title": {
+    "native": "tests/fixtures/nox/alliance-incentive-before-1018-native.png",
+    "normalized": "tests/fixtures/nox/alliance-incentive-before-1018.png",
+    "box": [
+      140,
+      160,
+      340,
+      225
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-chests-loot-selected": {
+    "native": "tests/fixtures/nox/alliance-chests-loot-tab-1018-native.png",
+    "normalized": "tests/fixtures/nox/alliance-chests-loot-tab-1018.png",
+    "box": [
+      180,
+      710,
+      390,
+      765
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-chests-gifts-selected": {
+    "native": "tests/fixtures/nox/alliance-chests-loot-before-1018-native.png",
+    "normalized": "tests/fixtures/nox/alliance-chests-loot-before-1018.png",
+    "box": [
+      710,
+      710,
+      885,
+      765
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-chests-incentive-icon": {
+    "native": "tests/fixtures/nox/alliance-chests-entry-1018-native.png",
+    "normalized": "tests/fixtures/nox/alliance-chests-entry-1018.png",
+    "box": [
+      610,
+      2130,
+      670,
+      2190
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "island-help-trophy": {
+    "native": "tests/fixtures/nox/island-help-20261018/visit-before-native.png",
+    "normalized": "tests/fixtures/nox/island-help-20261018/visit-before.png",
+    "logical": "tests/fixtures/nox/island-help-20261018/visit-before-logical.png",
+    "box": [
+      975,
+      340,
+      1035,
+      400
+    ],
+    "coordinate_space": "scene_view",
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "island-help-title": {
+    "native": "tests/fixtures/nox/island-help-20261018/prosperity-native.png",
+    "normalized": "tests/fixtures/nox/island-help-20261018/prosperity.png",
+    "logical": "tests/fixtures/nox/island-help-20261018/prosperity-logical.png",
+    "box": [
+      135,
+      240,
+      390,
+      300
+    ],
+    "coordinate_space": "scene_view",
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "island-help-visit": {
+    "native": "tests/fixtures/nox/island-help-20261018/list-01-native.png",
+    "normalized": "tests/fixtures/nox/island-help-20261018/list-01.png",
+    "logical": "tests/fixtures/nox/island-help-20261018/list-01-logical.png",
+    "box": [
+      935,
+      1220,
+      994,
+      1285
+    ],
+    "coordinate_space": "scene_view",
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "island-help-tend": {
+    "native": "tests/fixtures/nox/island-help-20261018/visit-before-native.png",
+    "normalized": "tests/fixtures/nox/island-help-20261018/visit-before.png",
+    "logical": "tests/fixtures/nox/island-help-20261018/visit-before-logical.png",
+    "box": [
+      478,
+      680,
+      602,
+      815
+    ],
+    "coordinate_space": "scene_view",
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "island-help-heart-white": {
+    "native": "tests/fixtures/nox/island-help-20261018/visit-before-native.png",
+    "normalized": "tests/fixtures/nox/island-help-20261018/visit-before.png",
+    "logical": "tests/fixtures/nox/island-help-20261018/visit-before-logical.png",
+    "box": [
+      962,
+      1294,
+      1038,
+      1366
+    ],
+    "coordinate_space": "scene_view",
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "island-help-heart-red": {
+    "native": "tests/fixtures/nox/island-help-20261018/visit-liked-native.png",
+    "normalized": "tests/fixtures/nox/island-help-20261018/visit-liked.png",
+    "logical": "tests/fixtures/nox/island-help-20261018/visit-liked-logical.png",
+    "box": [
+      962,
+      1294,
+      1038,
+      1366
+    ],
+    "coordinate_space": "scene_view",
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "island-help-visitor": {
+    "native": "tests/fixtures/nox/island-help-20261018/visit-before-native.png",
+    "normalized": "tests/fixtures/nox/island-help-20261018/visit-before.png",
+    "logical": "tests/fixtures/nox/island-help-20261018/visit-before-logical.png",
+    "box": [
+      955,
+      1570,
+      1042,
+      1648
+    ],
+    "coordinate_space": "scene_view",
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "heal-title": {
+    "native": "tests/fixtures/nox/heal-big-20261018-dialog-sampled-native.png",
+    "normalized": "tests/fixtures/nox/heal-big-20261018-dialog-sampled.png",
+    "box": [
+      416,
+      638,
+      615,
+      693
+    ],
+    "device": "127.0.0.1:62001",
+    "model": "SM-N976N"
+  },
+  "heal-quick": {
+    "native": "tests/fixtures/nox/heal-big-20261018-dialog-sampled-native.png",
+    "normalized": "tests/fixtures/nox/heal-big-20261018-dialog-sampled.png",
+    "box": [
+      150,
+      1498,
+      250,
+      1598
+    ],
+    "device": "127.0.0.1:62001",
+    "model": "SM-N976N"
+  },
+  "heal-treat": {
+    "native": "tests/fixtures/nox/heal-big-20261018-dialog-sampled-native.png",
+    "normalized": "tests/fixtures/nox/heal-big-20261018-dialog-sampled.png",
+    "box": [
+      730,
+      1498,
+      825,
+      1548
+    ],
+    "device": "127.0.0.1:62001",
+    "model": "SM-N976N"
+  },
+  "heal-help": {
+    "native": "tests/fixtures/nox/heal-big-20261018-progress-sampled-native.png",
+    "normalized": "tests/fixtures/nox/heal-big-20261018-progress-sampled.png",
+    "box": [
+      675,
+      1523,
+      877,
+      1580
+    ],
+    "device": "127.0.0.1:62001",
+    "model": "SM-N976N"
+  },
+  "heal-progress": {
+    "native": "tests/fixtures/nox/heal-big-20261018-progress-sampled-native.png",
+    "normalized": "tests/fixtures/nox/heal-big-20261018-progress-sampled.png",
+    "box": [
+      190,
+      1403,
+      300,
+      1443
+    ],
+    "device": "127.0.0.1:62001",
+    "model": "SM-N976N"
+  },
+  "heal-icon": {
+    "native": "tests/fixtures/nox/heal-big-20261018-field-native.png",
+    "normalized": "tests/fixtures/nox/heal-big-20261018-field.png",
+    "box": [
+      800,
+      1955,
+      866,
+      2015
+    ],
+    "device": "127.0.0.1:62001",
+    "model": "SM-N976N"
+  },
+  "alliance-chests-incentive-icon-weekly": {
+    "native": "tests/fixtures/nox/alliance-incentive-new-entry-1019-native.png",
+    "normalized": "tests/fixtures/nox/alliance-incentive-new-entry-1019.png",
+    "box": [
+      610,
+      2130,
+      670,
+      2190
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  },
+  "alliance-chests-incentive-open": {
+    "native": "tests/fixtures/nox/alliance-incentive-open-before-1019-native.png",
+    "normalized": "tests/fixtures/nox/alliance-incentive-open-before-1019.png",
+    "box": [
+      280,
+      510,
+      780,
+      1000
+    ],
+    "device": "127.0.0.1:62025",
+    "model": "SM-G977N"
+  }
+}

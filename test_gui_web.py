@@ -1,6 +1,8 @@
 """Desktop bridge regressions without operating an emulator."""
 
 import io
+import contextlib
+import threading
 import json
 import os
 from pathlib import Path
@@ -16,7 +18,7 @@ import emulator_runtime
 
 
 def inventory(*rows):
-    return ([{"id": serial, "key": "avd:" + serial, "name": name, "avd": name,
+    return ([{"id": serial, "key": "serial:" + serial, "name": name, "avd": "",
               "serial": serial, "status": "running"} for serial, name in rows], "")
 
 
@@ -34,51 +36,118 @@ class DesktopBackendTest(unittest.TestCase):
         ready = patch.object(desktop, "device_ready", return_value=True)
         ready.start()
         self.addCleanup(ready.stop)
-        identity = patch.object(desktop, "emulator_config_key", side_effect=lambda serial: "avd:" + serial)
-        identity.start()
-        self.addCleanup(identity.stop)
 
     def devices(self):
         with patch.object(desktop, "discover_emulators", return_value=inventory(("emulator-5554", "A"), ("emulator-5556", "B"))):
             self.api._scan()
 
-    def test_discovery_merges_installed_avds_and_connected_emulators(self):
-        devices = "List of devices attached\nemulator-5554 device model:Pixel_5\n" \
-                  "127.0.0.1:62001 device model:Nox_Player\nother-device device\nemulator-5556 offline\n"
+    def test_open_screenshot_uses_default_viewer_and_preserves_spaces(self):
+        image = Path(self.directory.name) / "artifacts/exception_screenshots/模拟器 A/2026-10-18/失败截图.png"
+        image.parent.mkdir(parents=True)
+        image.touch()
+        with patch.object(desktop.os, "startfile") as open_image:
+            self.assertTrue(self.api.open_screenshot(str(image)))
+            open_image.assert_called_once_with(str(image.resolve()))
 
-        def fake_run(command, **kwargs):
-            if command[-1] == "-list-avds":
-                return subprocess.CompletedProcess(command, 0, "Pixel_5\nPixel_5_2\n")
-            if command[1:3] == ["devices", "-l"]:
-                return subprocess.CompletedProcess(command, 0, devices)
-            if command[-3:] == ["emu", "avd", "name"]:
-                return subprocess.CompletedProcess(command, 0, "Pixel_5\nOK\n" if command[2] == "emulator-5554" else "Pixel_5_2\nOK\n")
-            if command[-1] == "get-state":
-                return subprocess.CompletedProcess(command, 0, "device\n")
-            if command[-1] == "sys.boot_completed":
-                return subprocess.CompletedProcess(command, 0, "1\n")
-            return subprocess.CompletedProcess(command, 0, "1\n" if command[2] == "127.0.0.1:62001" else "0\n")
+    def test_open_screenshot_rejects_missing_or_unrelated_files(self):
+        root = Path(self.directory.name)
+        with patch.object(desktop.os, "startfile") as open_image:
+            for path, message in [
+                ("artifacts/exception_screenshots/missing.png", "截图不存在"),
+                (str(root / "outside.png"), "只能打开异常截图"),
+                ("artifacts/exception_screenshots/../../outside.png", "只能打开异常截图"),
+                ("artifacts/exception_screenshots/program.exe", "只能打开异常截图"),
+            ]:
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, message):
+                    self.api.open_screenshot(path)
+            open_image.assert_not_called()
 
-        with patch.object(desktop.subprocess, "run", side_effect=fake_run), \
-                patch.object(emulator_runtime, "resolve_emulator", return_value=Path("sdk/emulator.exe")):
-            found, error = desktop.discover_emulators()
-        self.assertFalse(error)
-        self.assertEqual([(item["id"], item["status"]) for item in found], [
-            ("avd:Pixel_5", "running"), ("avd:Pixel_5_2", "starting"),
-            ("serial:127.0.0.1:62001", "running")])
-        self.assertEqual(found[0]["serial"], "emulator-5554")
+    def test_open_screenshot_reports_viewer_failure(self):
+        image = Path(self.directory.name) / "artifacts/exception_screenshots/failure.png"
+        image.parent.mkdir(parents=True)
+        image.touch()
+        with patch.object(desktop.os, "startfile", side_effect=OSError("没有关联的查看器")):
+            with self.assertRaisesRegex(ValueError, "无法打开截图"):
+                self.api.open_screenshot(str(image))
 
-    def test_avd_name_is_stable_and_serial_is_fallback(self):
-        with patch.object(desktop.subprocess, "run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, "Pixel_5\nOK\n")
-            self.assertEqual(emulator_runtime.avd_key("emulator-5554"), "avd:Pixel_5")
-            self.assertEqual(emulator_runtime.avd_key("emulator-5556"), "avd:Pixel_5")
-            self.assertEqual(run.call_args.args[0][-3:], ["emu", "avd", "name"])
-            run.reset_mock()
-            self.assertEqual(emulator_runtime.avd_key("127.0.0.1:62001"), "serial:127.0.0.1:62001")
-            run.assert_not_called()
-            run.side_effect = subprocess.TimeoutExpired("adb", 4)
-            self.assertEqual(emulator_runtime.avd_key("emulator-5554"), "serial:emulator-5554")
+
+    def phone(self, status="running"):
+        device = {"id": "serial:PHONE123", "key": "serial:PHONE123", "name": "Pixel 7",
+                  "avd": "", "serial": "PHONE123", "status": status, "kind": "physical"}
+        with patch.object(desktop, "discover_emulators", return_value=([device], "")):
+            self.api._scan()
+        return device
+
+    def test_phone_task_uses_serial_and_saves_independent_config(self):
+        self.devices()
+        config = desktop.default_config()
+        config["entries"]["tree_threshold"] = "2500"
+        save_config(self.directory.name, "serial:PHONE123", "PHONE123", config)
+        phone = self.phone()
+        self.assertEqual(self.api.get_state()["config"], config)
+        process = Mock(stdout=io.StringIO("任务结束\n"))
+        process.wait.return_value = 0
+        with patch.object(desktop.subprocess, "Popen", return_value=process) as launch, \
+                patch.object(desktop, "device_ready", return_value=True) as ready:
+            self.api.start(config)
+            self.api._reader.join(timeout=2)
+        command = launch.call_args.args[0]
+        self.assertEqual(command[command.index("--device") + 1], "PHONE123")
+        ready.assert_called_once_with("PHONE123")
+        self.assertEqual(desktop.checked_config(load_config(self.directory.name, phone["key"]), from_disk=True), config)
+
+    def test_phone_connection_errors_prevent_task_launch_with_actionable_message(self):
+        for status, message in [("unauthorized", "允许 USB 调试"), ("offline", "数据线")]:
+            with self.subTest(status=status):
+                self.phone(status)
+                self.assertIn(message, self.api.get_state()["device_status"])
+                with patch.object(desktop.subprocess, "Popen") as launch:
+                    with self.assertRaisesRegex(ValueError, message):
+                        self.api.start(desktop.default_config())
+                launch.assert_not_called()
+
+
+    def test_disconnected_phone_is_rechecked_before_task_launch(self):
+        self.phone()
+        with patch.object(desktop, "device_ready", return_value=False), \
+                patch.object(desktop.subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(ValueError, "未连接"):
+                self.api.start(desktop.default_config())
+        launch.assert_not_called()
+
+    def test_notes_persist_without_changing_selection_or_configuration(self):
+        from emulator_config import config_path
+        self.devices()
+        config = self.api.get_state()["config"]
+        path = save_config(self.directory.name, "serial:emulator-5554", "emulator-5554", config)
+        before = path.read_bytes()
+        selected = self.api.get_state()["selected"]
+        state = self.api.set_device_note("emulator-5556", "小号")
+        self.assertEqual(state["selected"], selected)
+        self.assertEqual(state["config"], config)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(config_path(self.directory.name, "serial:emulator-5556").exists())
+        # The AVD can acquire a different port after restart without losing its note.
+        changed = inventory(("emulator-5560", "B"))
+        changed[0][0]["key"] = "serial:emulator-5556"
+        restored = desktop.DesktopApi(self.directory.name)
+        self.addCleanup(restored._close)
+        with patch.object(desktop, "discover_emulators", return_value=changed):
+            restored._scan()
+        self.assertEqual(restored.get_state()["devices"][0]["note"], "小号")
+        restored.set_device_note("emulator-5560", "")
+        with patch.object(desktop, "discover_emulators", return_value=changed):
+            restored._scan()
+        self.assertEqual(restored.get_state()["devices"][0]["note"], "")
+
+    def test_phone_notes_survive_refresh_and_reject_missing_devices(self):
+        phone = self.phone()
+        self.api.set_device_note(phone["id"], "我的手机")
+        self.phone()
+        self.assertEqual(self.api.get_state()["devices"][0]["note"], "我的手机")
+        with self.assertRaisesRegex(ValueError, "不在列表"):
+            self.api.set_device_note("serial:missing", "备注")
+
 
     def test_corrupt_saved_config_falls_back_with_visible_warning(self):
         for contents in ["{broken", "[]", '{"version": 99}']:
@@ -86,7 +155,7 @@ class DesktopBackendTest(unittest.TestCase):
                 path = Path(self.directory.name) / "configs"
                 path.mkdir(exist_ok=True)
                 from emulator_config import config_path
-                config_path(self.directory.name, "avd:emulator-5554").write_text(contents, encoding="utf-8")
+                config_path(self.directory.name, "serial:emulator-5554").write_text(contents, encoding="utf-8")
                 self.api = desktop.DesktopApi(self.directory.name)
                 self.devices()
                 state = self.api.get_state()
@@ -114,7 +183,7 @@ class DesktopBackendTest(unittest.TestCase):
         config = desktop.default_config()
         config["options"].update(help=False, upgrade=True, spear=False, bounty=True, wood=False)
         config["entries"].update(tree_threshold="1250", stamina_threshold="40", reconnect_minutes="0.5")
-        config["resource_levels"]["iron"] = "8级矿"
+        config["gather_steps"] = [{"resource": name, "level": "8级"} for name in ("meat", "coal", "iron")]
         command = desktop.build_command(config, "emulator-5554")
         self.assertEqual(command[:5], [sys.executable, "-X", "utf8", "-u", str(desktop.ROOT / "help_bot.py")])
         self.assertIn("--no-help", command)
@@ -122,10 +191,10 @@ class DesktopBackendTest(unittest.TestCase):
         self.assertIn("--upgrade", command)
         self.assertIn("--bounty", command)
         for flag, value in [("--device", "emulator-5554"), ("--tree-threshold", "1250"),
-                            ("--stamina-threshold", "40"), ("--reconnect-minutes", "0.5"), ("--iron-level", "8")]:
+                            ("--stamina-threshold", "40"), ("--reconnect-minutes", "0.5")]:
             self.assertEqual(command[command.index(flag) + 1], value)
-        start = command.index("--resources")
-        self.assertEqual(command[start + 1:start + 4], ["meat", "coal", "iron"])
+        start = command.index("--gather-steps")
+        self.assertEqual(command[start + 1:start + 4], ["meat:8", "coal:8", "iron:8"])
         self.assertNotIn("--wood-level", command)
 
     def test_help_clicker_defaults_off_and_old_settings_remain_compatible(self):
@@ -144,15 +213,29 @@ class DesktopBackendTest(unittest.TestCase):
         restored["options"]["task_rewards"] = False
         self.assertIn("--no-task-rewards", desktop.build_command(restored, "emulator-test"))
 
+    def test_alliance_chests_default_legacy_config_and_independent_disable_flag(self):
+        config = desktop.default_config()
+        self.assertTrue(config['options'].pop('alliance_chests'))
+        restored = desktop.checked_config(config, from_disk=True)
+        self.assertTrue(restored['options']['alliance_chests'])
+        restored['options']['donate'] = False
+        command = desktop.build_command(restored, 'emulator-test')
+        self.assertIn('--no-donate', command)
+        self.assertNotIn('--no-alliance-chests', command)
+        restored['options']['alliance_chests'] = False
+        self.assertIn('--no-alliance-chests', desktop.build_command(restored, 'emulator-test'))
+
     def test_bear_defaults_and_legacy_config_upgrade(self):
         config = desktop.default_config()
         self.assertFalse(config["options"].pop("bear"))
         self.assertFalse(config["options"].pop("bear_drive"))
-        self.assertTrue(config["options"].pop("bear_follow"))
+        self.assertFalse(config["options"].pop("bear_follow"))
+        self.assertTrue(config["options"].pop("bear_follow_no_heroes"))
         restored = desktop.checked_config(config, from_disk=True)
         self.assertFalse(restored["options"]["bear"])
         self.assertFalse(restored["options"]["bear_drive"])
-        self.assertTrue(restored["options"]["bear_follow"])
+        self.assertFalse(restored["options"]["bear_follow"])
+        self.assertTrue(restored["options"]["bear_follow_no_heroes"])
 
     def test_bear_modes_saved_per_emulator_and_other_preferences_preserved(self):
         self.devices()
@@ -161,26 +244,35 @@ class DesktopBackendTest(unittest.TestCase):
         self.api.update_config(config)
         restored = desktop.DesktopApi(self.directory.name)
         self.addCleanup(restored._close)
-        restored._keys = {"emulator-5554": "avd:emulator-5554"}
+        restored._keys = {"emulator-5554": "serial:emulator-5554"}
         restored._choose("emulator-5554")
         self.assertEqual(restored.get_state()["config"]["options"], config["options"])
         self.api.select_device("emulator-5556", config)
         self.assertFalse(self.api.get_state()["config"]["options"]["bear"])
-        self.assertTrue(self.api.get_state()["config"]["options"]["bear_follow"])
+        self.assertFalse(self.api.get_state()["config"]["options"]["bear_follow"])
+        self.assertTrue(self.api.get_state()["config"]["options"]["bear_follow_no_heroes"])
 
-    def test_bear_never_launches_daily_tasks_before_runtime_is_connected(self):
-        self.devices()
+
+    def test_bear_mode_combinations_and_reconnect_validation(self):
         config = desktop.default_config()
-        config["options"].update(bear=True, beast=False, polar_beast=False)
-        config["hunt_levels"]["beast"] = "invalid"
-        self.assertTrue(desktop.checked_config(config)["options"]["bear"])
-        with patch.object(desktop.subprocess, "Popen") as launch:
-            with self.assertRaisesRegex(ValueError, "自动打熊执行流程尚未接入"):
-                self.api.start(config)
-        launch.assert_not_called()
-        config["options"]["help_clicker"] = True
-        with self.assertRaisesRegex(ValueError, "不能同时开启"):
-            desktop.checked_config(config)
+        config["options"].update(bear=True, bear_follow=False, bear_drive=True, bear_follow_no_heroes=False)
+        self.assertEqual(desktop.build_command(config, "test")[-3:], ["--bear", "--bear-modes", "drive"])
+        config["options"]["bear_follow"] = True
+        self.assertEqual(desktop.build_command(config, "test")[-4:], ["--bear", "--bear-modes", "drive", "follow"])
+        config["entries"]["reconnect_minutes"] = "invalid"
+        with self.assertRaisesRegex(ValueError, "重连等待"):
+            desktop.build_command(config, "test")
+        config["options"]["reconnect"] = False
+        self.assertIn("--no-reconnect", desktop.build_command(config, "test"))
+        config["options"].update(bear_drive=False, bear_follow=False)
+        with self.assertRaisesRegex(ValueError, "至少要勾选"):
+            desktop.build_command(config, "test")
+
+    def test_no_hero_follow_default_and_precedence(self):
+        config = desktop.default_config()
+        config["options"].update(bear=True, bear_follow=True)
+        self.assertEqual(desktop.build_command(config, "test")[-3:],
+                         ["--bear", "--bear-modes", "follow_no_heroes"])
 
     def test_legacy_saved_help_clicker_is_ignored_but_live_confirmation_is_kept(self):
         config = desktop.default_config()
@@ -215,7 +307,7 @@ class DesktopBackendTest(unittest.TestCase):
             self.api.start(config)
             self.api._reader.join(timeout=2)
         self.assertIn("--help-clicker", launch.call_args.args[0])
-        saved = load_config(self.directory.name, "avd:emulator-5554")
+        saved = load_config(self.directory.name, "serial:emulator-5554")
         self.assertNotIn("help_clicker", saved["options"])
         self.assertTrue(self.api.get_state()["config"]["options"]["help_clicker"])
         self.assertFalse(saved["options"]["beast"])
@@ -224,7 +316,7 @@ class DesktopBackendTest(unittest.TestCase):
         self.assertFalse(any("自动打怪配置" in line or "资源采集配置" in line for line in logs))
         restored = desktop.DesktopApi(self.directory.name)
         self.addCleanup(restored._close)
-        restored._keys = {"emulator-5554": "avd:emulator-5554"}
+        restored._keys = {"emulator-5554": "serial:emulator-5554"}
         restored._choose("emulator-5554")
         self.assertFalse(restored.get_state()["config"]["options"]["help_clicker"])
 
@@ -250,13 +342,47 @@ class DesktopBackendTest(unittest.TestCase):
                     self.api.start(config)
                 process.assert_not_called()
         config = desktop.default_config()
-        for name, _ in desktop.RESOURCES:
-            config["options"][name] = False
+        config["gather_steps"] = []
         with self.assertRaisesRegex(ValueError, "资源"):
             desktop.build_command(config, "emulator-5554")
         self.api._close()
         with self.assertRaisesRegex(ValueError, "关闭"):
             self.api.start(desktop.default_config())
+
+    def test_gather_full_only_defaults_legacy_and_command(self):
+        config = desktop.default_config()
+        self.assertTrue(config['options']['gather_full_only'])
+        del config['options']['gather_full_only']
+        self.assertTrue(desktop.checked_config(config, from_disk=True)['options']['gather_full_only'])
+        for enabled in (True, False):
+            config['options']['gather_full_only'] = enabled
+            checked = desktop.checked_config(config)
+            command = desktop.build_command(checked, 'test')
+            self.assertEqual('--no-gather-full-only' in command, not enabled)
+            config['options']['gather'] = False
+            self.assertNotIn('--no-gather-full-only', desktop.build_command(config, 'test'))
+            config['options']['gather'] = True
+
+    def test_gather_steps_defaults_limits_order_and_legacy_migration(self):
+        config = desktop.default_config()
+        self.assertEqual(config["gather_steps"], [
+            {"resource": name, "level": "8级"} for name, _ in desktop.RESOURCES])
+        for count in (1, 6):
+            config["gather_steps"] = [{"resource": "wood", "level": f"{i + 1}级"} for i in range(count)]
+            checked = desktop.checked_config(config)
+            command = desktop.build_command(checked, "test")
+            self.assertEqual(command[command.index("--gather-steps") + 1:],
+                             [f"wood:{i + 1}" for i in range(count)])
+        for invalid in ([], [{}] * 7, [{"resource": "bad", "level": "8级"}], None):
+            config["gather_steps"] = invalid
+            with self.assertRaises(ValueError):
+                desktop.checked_config(config)
+        config = desktop.default_config()
+        del config["gather_steps"]
+        config["options"]["meat"] = False
+        config["resource_levels"] = {name: "7级矿" for name, _ in desktop.RESOURCES}
+        self.assertEqual(desktop.checked_config(config, from_disk=True)["gather_steps"],
+                         [{"resource": name, "level": "7级"} for name in ("wood", "coal", "iron")])
 
     def test_fourth_level_reaches_launch_and_saved_config_for_each_resource(self):
         self.devices()
@@ -264,7 +390,8 @@ class DesktopBackendTest(unittest.TestCase):
             with self.subTest(resource=resource):
                 config = desktop.default_config()
                 config["options"].update({name: name == resource for name, _ in desktop.RESOURCES})
-                config["resource_levels"][resource] = "4级矿"
+                config["gather_steps"] = [{"resource": resource, "level": "4级"}]
+                config["options"]["gather_full_only"] = resource in ("meat", "coal")
                 self.api.update_config(config)
                 process = Mock(stdout=io.StringIO(""))
                 process.wait.return_value = 0
@@ -272,33 +399,36 @@ class DesktopBackendTest(unittest.TestCase):
                     self.api.start(self.api.get_state()["config"])
                     self.api._reader.join(timeout=2)
                 command = launch.call_args.args[0]
-                self.assertEqual(command[command.index(f"--{resource}-level") + 1], "4")
-                saved = load_config(self.directory.name, "avd:emulator-5554")
-                self.assertEqual(saved["resource_levels"][resource], "4级矿")
+                self.assertEqual(command[command.index("--gather-steps") + 1], f"{resource}:4")
+                saved = load_config(self.directory.name, "serial:emulator-5554")
+                self.assertEqual(saved["options"]["gather_full_only"], config["options"]["gather_full_only"])
+                self.assertEqual("--no-gather-full-only" in command, not config["options"]["gather_full_only"])
+                self.assertEqual(saved["gather_steps"], config["gather_steps"])
                 restored = desktop.DesktopApi(self.directory.name)
-                restored._keys = {"emulator-5554": "avd:emulator-5554"}
+                restored._keys = {"emulator-5554": "serial:emulator-5554"}
                 restored._choose("emulator-5554")
-                self.assertEqual(restored.get_state()["config"]["resource_levels"][resource], "4级矿")
-                self.assertTrue(any(f"{dict(desktop.RESOURCES)[resource]} 4级矿" in line["text"]
+                self.assertEqual(restored.get_state()["config"]["gather_steps"], config["gather_steps"])
+                self.assertEqual(restored.get_state()["config"]["options"]["gather_full_only"], config["options"]["gather_full_only"])
+                self.assertTrue(any(f"{dict(desktop.RESOURCES)[resource]} 4级" in line["text"]
                                     for line in self.api.get_state()["logs"]))
 
     def test_invalid_bridge_level_does_not_silently_launch_level_one(self):
         self.devices()
-        for invalid in ("4", 4, "4级", None):
+        for invalid in ("4", 4, "4级矿", None):
             with self.subTest(invalid=invalid):
                 config = desktop.default_config()
-                config["resource_levels"]["meat"] = invalid
+                config["gather_steps"][0]["level"] = invalid
                 with patch.object(desktop.subprocess, "Popen") as launch:
                     with self.assertRaisesRegex(ValueError, "资源采集等级"):
                         self.api.start(config)
                     launch.assert_not_called()
-                self.assertEqual(desktop.checked_config(config, from_disk=True)["resource_levels"]["meat"],
-                                 "1级矿")
+                self.assertEqual(desktop.checked_config(config, from_disk=True)["gather_steps"],
+                                 desktop.default_config()["gather_steps"])
 
     def test_emulators_keep_independent_settings_and_stable_identity(self):
         config_b = desktop.default_config()
         config_b["entries"]["tree_threshold"] = "2500"
-        save_config(self.directory.name, "avd:emulator-5556", "emulator-5556", config_b)
+        save_config(self.directory.name, "serial:emulator-5556", "emulator-5556", config_b)
         self.devices()
         config_a = self.api.get_state()["config"]
         config_a["entries"]["tree_threshold"] = "1500"
@@ -307,7 +437,7 @@ class DesktopBackendTest(unittest.TestCase):
         state = self.api.select_device("emulator-5554", state["config"])
         self.assertEqual(state["config"]["entries"]["tree_threshold"], "1500")
         changed = inventory(("emulator-5560", "A"))
-        changed[0][0]["key"] = "avd:emulator-5554"
+        changed[0][0]["key"] = "serial:emulator-5554"
         with patch.object(desktop, "discover_emulators", return_value=changed):
             self.api._scan()
         state = self.api.get_state()
@@ -322,12 +452,16 @@ class DesktopBackendTest(unittest.TestCase):
         self.assertEqual(checked["entries"], desktop.default_config()["entries"])
         self.assertTrue(all(checked["options"][name] for name, _ in desktop.RESOURCES))
 
-    def test_logs_are_bounded_incremental_and_state_is_a_copy(self):
+    def test_full_logs_survive_stop_snapshot_and_remain_incremental(self):
+        self.api._append("首次异常：凌晨的问题")
         for index in range(2010):
             self.api._append(f"日志 {index}")
         state = self.api.get_state(0)
-        self.assertTrue(state["log_reset"])
-        self.assertEqual(len(state["logs"]), 2000)
+        self.assertFalse(state["log_reset"])
+        self.assertEqual(len(state["logs"]), 2011)
+        stopped = self.api.stop()
+        self.assertEqual(stopped["logs"], state["logs"])
+        self.assertTrue(stopped["logs"][0]["error"])
         self.assertEqual(self.api.get_state(state["last_log"])["logs"], [])
         state["config"]["entries"]["tree_threshold"] = "999"
         self.assertEqual(self.api.get_state()["config"]["entries"]["tree_threshold"], "1000")
@@ -336,6 +470,39 @@ class DesktopBackendTest(unittest.TestCase):
         self.assertFalse(delta["log_reset"])
         self.assertEqual(len(delta["logs"]), 1)
         self.assertTrue(delta["logs"][0]["error"])
+
+    def test_retry_log_is_a_warning_instead_of_an_error(self):
+        line = "资源采集 第 1 次重试异常：未确认野外；10 秒后尝试恢复主城并重试（第 2 次）"
+        self.api._append(line)
+        row, = self.api.get_state()["logs"]
+        self.assertTrue(row["warning"])
+        self.assertFalse(row["error"])
+        self.assertIn(line, row["text"])
+
+    def test_startup_does_not_restore_saved_logs_when_selecting_devices(self):
+        logs = desktop.SessionLogs(self.directory.name, "serial:emulator-5554")
+        logs.append("首次异常：保留旧异常")
+        logs.append("此前运行的最后一行")
+        self.devices()
+        first = self.api.get_state()["logs"]
+        self.assertEqual(first, [])
+        self.api._choose("emulator-5556")
+        self.api._choose("emulator-5554")
+        self.assertEqual(self.api.get_state()["logs"], first)
+
+    def test_current_session_logs_remain_separate_when_switching_accounts(self):
+        self.devices()
+        self.api._append("大号本次日志")
+        large = self.api.get_state()
+        self.api._choose("emulator-5556")
+        self.assertEqual(self.api.get_state()["logs"], [])
+        self.api._append("小号本次日志")
+        small = self.api.get_state()
+        self.assertNotEqual(large["log_key"], small["log_key"])
+        self.assertEqual(len(small["logs"]), 1)
+        self.assertIn("小号本次日志", small["logs"][0]["text"])
+        self.api._choose("emulator-5554")
+        self.assertEqual(self.api.get_state()["logs"], large["logs"])
 
     def test_start_saves_config_drains_final_output_and_clears_running(self):
         self.devices()
@@ -346,15 +513,32 @@ class DesktopBackendTest(unittest.TestCase):
             self.api._reader.join(timeout=2)
         self.assertFalse(self.api.get_state()["running"])
         self.assertEqual(self.api.get_state()["notice"]["message"], "ValueError: 最后一条异常")
-        self.assertEqual(desktop.checked_config(load_config(self.directory.name, "avd:emulator-5554"),
+        self.assertEqual(desktop.checked_config(load_config(self.directory.name, "serial:emulator-5554"),
                                                from_disk=True), desktop.default_config())
         self.assertTrue(process.stdout.closed)
+
+    def test_reported_stop_is_displayed_once_and_still_sets_failure_state(self):
+        reason = "RetriesExhausted: 启动时主城检查 重试失败：超时；失败截图：example.png"
+        line = f"[2026-10-18 23:41:24] 已停止：{reason}"
+        process = Mock(stdout=io.StringIO(line + "\n"), stdin=None)
+        process.wait.return_value = 1
+        self.api._process = process
+        self.api._task_status = {"help": {"status": "running"}}
+        self.api._read_process(process)
+        state = self.api.get_state()
+        self.assertEqual([row["text"] for row in state["logs"]], [line])
+        self.assertFalse(state["running"])
+        self.assertEqual(state["notice"]["message"], reason)
+        self.assertEqual(self.api._task_status["help"]["status"], "failed")
+        self.assertEqual(self.api._task_status["help"]["reason"], reason)
 
     def test_reader_saves_ready_only_after_confirmed_navigation_and_clears_on_exit(self):
         messages = [
             ("小号模式互助连点已启用，其他任务已跳过；停止程序可结束连点", False),
             ("已进入联盟互助，持续快速点击底部全部帮助区域", True),
             ("启动时主城检查已通过，开始运行任务", True),
+            ("自动打熊已启用，其他任务已跳过；停止程序可结束打熊", False),
+            ("自动打熊主城检查已通过，开始运行任务", True),
         ]
         runtime_path = Path(self.directory.name) / "configs" / "runtime" / f"desktop-{os.getpid()}.json"
         for message, expected_ready in messages:
@@ -362,7 +546,7 @@ class DesktopBackendTest(unittest.TestCase):
                 process = Mock(stdout=io.StringIO(f"[2026-10-10 12:00:00] {message}\n"),
                                stdin=None, pid=12345)
                 self.api._process = process
-                self.api._active_key = "avd:emulator-5554"
+                self.api._active_key = "serial:emulator-5554"
                 self.api._task_ready = False
                 self.api._save_runtime()
 
@@ -415,195 +599,28 @@ class DesktopBackendTest(unittest.TestCase):
         self.assertIn("模拟器", replies[3]["error"])
         self.assertTrue(self.api._closed)
 
-    def stopped_device(self):
-        device = {"id": "avd:Pixel_5", "key": "avd:Pixel_5", "name": "Pixel_5",
-                  "avd": "Pixel_5", "serial": "", "status": "stopped"}
-        with patch.object(desktop, "discover_emulators", return_value=([device], "")):
-            self.api._scan()
-        return device
+    def test_background_diagnostics_do_not_corrupt_json_responses(self):
+        original = self.api.get_state
 
-    def test_stopped_and_booting_emulators_cannot_start_tasks(self):
-        device = self.stopped_device()
-        config = desktop.default_config()
-        config["entries"]["tree_threshold"] = "1500"
-        self.api.update_config(config)
-        for status, message in [("stopped", "未启动"), ("starting", "正在启动"), ("unknown", "未连接")]:
-            device["status"] = status
-            with patch.object(desktop.subprocess, "Popen") as process:
-                with self.assertRaisesRegex(ValueError, message):
-                    self.api.start(config)
-                process.assert_not_called()
-        self.assertEqual(self.api.get_state()["config"], config)
+        def noisy_state():
+            print("屏幕适配：1176×2400 → 1080×2340", flush=True)
+            thread = threading.Thread(target=lambda: print("后台线程诊断", flush=True))
+            thread.start()
+            thread.join()
+            return original()
 
-    def test_emulator_launch_uses_requested_flags_and_rejects_duplicate_launch(self):
-        self.stopped_device()
-        process = Mock()
-        process.poll.return_value = None
-        with patch.object(desktop, "resolve_emulator", return_value=Path("sdk/emulator.exe")), \
-                patch.object(desktop.subprocess, "Popen", return_value=process) as launch, \
-                patch.object(self.api, "_monitor_launches"):
-            state = self.api.launch_emulator("avd:Pixel_5")
-            self.assertEqual(launch.call_args.args[0], [str(Path("sdk/emulator.exe")), "-avd", "Pixel_5", "-noaudio", "-no-snapshot-load"])
-            self.assertEqual(state["devices"][0]["status"], "starting")
-            self.assertFalse(state["running"])
-            with self.assertRaisesRegex(ValueError, "正在启动"):
-                self.api.launch_emulator("avd:Pixel_5")
-            launch.assert_called_once()
-        self.api._close()
-        process.terminate.assert_not_called()
-
-    def test_emulator_launch_failure_keeps_stopped_state(self):
-        self.stopped_device()
-        with patch.object(desktop.subprocess, "Popen", side_effect=OSError("missing emulator")):
-            with self.assertRaises(OSError):
-                self.api.launch_emulator("avd:Pixel_5")
-        self.assertEqual(self.api.get_state()["devices"][0]["status"], "stopped")
-        self.assertFalse(self.api._launches)
-
-    def restarting_device(self):
-        device = self.stopped_device()
-        device.update(status="running", serial="emulator-5554")
-        with patch.object(desktop.threading, "Thread"):
-            state = self.api.restart_emulator(device["id"])
-        self.assertEqual(state["devices"][0]["status"], "restarting")
-        self.assertFalse(state["running"])
-        return device
-
-    def test_restart_closes_before_reusing_launch_command_and_preserves_config(self):
-        device = self.restarting_device()
-        config = desktop.default_config()
-        config["entries"]["tree_threshold"] = "1700"
-        self.api.update_config(config)
-        with self.assertRaisesRegex(ValueError, "正在重启"):
-            self.api.restart_emulator(device["id"])
-        with self.assertRaises(ValueError):
-            self.api.start(config)
-        order = []
-        process = Mock()
-        process.poll.return_value = None
-        def shutdown(*args):
-            self.assertEqual(args, ("emulator-5554", "Pixel_5"))
-            order.append("closed")
-        def launch(*args, **kwargs):
-            self.assertEqual(order, ["closed"])
-            order.append("launched")
-            return process
-        with patch.object(desktop, "stop_emulator", side_effect=shutdown), \
-                patch.object(desktop, "resolve_emulator", return_value=Path("sdk/emulator.exe")), \
-                patch.object(desktop.subprocess, "Popen", side_effect=launch) as popen, \
-                patch.object(desktop.threading, "Thread"):
-            self.api._restart_emulator(device["id"])
-        self.assertEqual(order, ["closed", "launched"])
-        self.assertEqual(popen.call_args.args[0], [str(Path("sdk/emulator.exe")), "-avd", "Pixel_5", "-noaudio", "-no-snapshot-load"])
-        state = self.api.get_state()
-        self.assertEqual(state["devices"][0]["status"], "starting")
-        self.assertEqual(state["devices"][0]["serial"], "")
-        self.assertEqual(state["config"], config)
-        self.assertEqual(state["selected"], device["id"])
-        self.assertFalse(self.api._restarts)
-
-    def test_restart_failures_do_not_launch_before_confirmed_shutdown(self):
-        device = self.restarting_device()
-        with patch.object(desktop, "stop_emulator", side_effect=RuntimeError("关闭超时")), \
-                patch.object(desktop.subprocess, "Popen") as launch:
-            self.api._restart_emulator(device["id"])
-        launch.assert_not_called()
-        state = self.api.get_state()
-        self.assertEqual(state["devices"][0]["status"], "unknown")
-        self.assertIn("关闭超时", state["notice"]["message"])
-        self.assertFalse(self.api._restarts)
-        device["status"] = "running"
-        with patch.object(desktop.threading, "Thread"):
-            self.api.restart_emulator(device["id"])
-        with patch.object(desktop, "stop_emulator"), \
-                patch.object(desktop, "resolve_emulator", return_value=Path("sdk/emulator.exe")), \
-                patch.object(desktop.subprocess, "Popen", side_effect=OSError("launch failed")):
-            self.api._restart_emulator(device["id"])
-        self.assertEqual(self.api.get_state()["devices"][0]["status"], "stopped")
-        self.assertIn("launch failed", self.api.get_state()["notice"]["message"])
-
-    def test_scan_retains_restart_state_and_ignores_prelaunch_inventory(self):
-        device = self.restarting_device()
-        with patch.object(desktop, "discover_emulators", return_value=([], "")):
-            self.api._scan()
-        self.assertEqual(self.api.get_state()["devices"][0]["status"], "restarting")
-        def stale_inventory():
-            with patch.object(desktop, "stop_emulator"), \
-                    patch.object(desktop, "resolve_emulator", return_value=Path("sdk/emulator.exe")), \
-                    patch.object(desktop.subprocess, "Popen", return_value=Mock()), \
-                    patch.object(desktop.threading, "Thread"):
-                self.api._restart_emulator(device["id"])
-            return ([dict(device, status="running")], "")
-        with patch.object(desktop, "discover_emulators", side_effect=stale_inventory):
-            self.api._scan()
-        self.assertEqual(self.api.get_state()["devices"][0]["status"], "starting")
-        self.assertIn(device["id"], self.api._launches)
-
-    def test_restart_rejects_stopped_non_avd_and_task_running_devices(self):
-        device = self.stopped_device()
-        with self.assertRaises(ValueError):
-            self.api.restart_emulator(device["id"])
-        device.update(status="running", serial="emulator-5554", avd="")
-        with self.assertRaisesRegex(ValueError, "Android AVD"):
-            self.api.restart_emulator(device["id"])
-        device["avd"] = "Pixel_5"
-        self.api._process = Mock()
-        with self.assertRaisesRegex(ValueError, "先停止任务"):
-            self.api.restart_emulator(device["id"])
-        self.api._process = None
-
-    def test_window_close_during_shutdown_prevents_relaunch(self):
-        device = self.restarting_device()
-        with patch.object(desktop, "stop_emulator", side_effect=lambda *args: self.api._close()), \
-                patch.object(desktop.subprocess, "Popen") as launch:
-            self.api._restart_emulator(device["id"])
-        launch.assert_not_called()
-        self.assertFalse(self.api._restarts)
-
-    def test_launch_monitor_updates_ready_state_and_preserves_config(self):
-        device = self.stopped_device()
-        config = desktop.default_config()
-        config["entries"]["tree_threshold"] = "1600"
-        self.api.update_config(config)
-        process = Mock()
-        process.poll.return_value = None
-        with patch.object(desktop, "resolve_emulator", return_value=Path("sdk/emulator.exe")), \
-                patch.object(desktop.subprocess, "Popen", return_value=process), \
-                patch.object(self.api, "_monitor_launches"):
-            self.api.launch_emulator(device["id"])
-        stopped = dict(device, status="stopped")
-        with patch.object(desktop, "discover_emulators", return_value=([stopped], "")):
-            self.api._scan()
-        self.assertEqual(self.api.get_state()["devices"][0]["status"], "starting")
-        ready = dict(device, status="running", serial="emulator-5560")
-        with patch.object(desktop, "discover_emulators", return_value=([ready], "")):
-            self.api._scan()
-        self.assertEqual(self.api.get_state()["selected"], "avd:Pixel_5")
-        self.assertEqual(self.api.get_state()["config"], config)
-        self.assertFalse(self.api._launches)
-        task = Mock(stdout=io.StringIO(""))
-        task.wait.return_value = 0
-        with patch.object(desktop, "emulator_config_key", return_value="avd:Pixel_5"), \
-                patch.object(desktop.subprocess, "Popen", return_value=task) as launch:
-            self.api.start(config)
-            self.api._reader.join(timeout=2)
-        self.assertIn("emulator-5560", launch.call_args.args[0])
-        self.assertEqual(desktop.checked_config(load_config(self.directory.name, "avd:Pixel_5"),
-                                               from_disk=True), config)
-
-    def test_launch_process_failure_and_timeout_are_reported(self):
-        for code in [1, None]:
-            with self.subTest(code=code):
-                self.stopped_device()
-                process = Mock()
-                process.poll.return_value = code
-                self.api._launches["avd:Pixel_5"] = (process, 0)
-                with patch.object(desktop, "discover_emulators", return_value=([dict(self.api._devices[0])], "")), \
-                        patch.object(desktop.time, "monotonic", return_value=181):
-                    self.api._scan()
-                self.assertFalse(self.api._launches)
-                self.assertIn("Pixel_5", self.api.get_state()["notice"]["message"])
-                self.assertEqual(self.api.get_state()["devices"][0]["status"], "stopped" if code is not None else "unknown")
+        protocol, errors, incidental = io.StringIO(), io.StringIO(), io.StringIO()
+        request = io.StringIO(json.dumps({"id": 1, "method": "get_state"}) + "\n")
+        with (patch.object(self.api, "get_state", side_effect=noisy_state),
+              contextlib.redirect_stdout(incidental), contextlib.redirect_stderr(errors)):
+            desktop.serve_bridge(self.api, request, protocol)
+        replies = [json.loads(line) for line in protocol.getvalue().splitlines()]
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0]["id"], 1)
+        self.assertIn("result", replies[0])
+        self.assertEqual(incidental.getvalue(), "")
+        self.assertIn("屏幕适配", errors.getvalue())
+        self.assertIn("后台线程诊断", errors.getvalue())
 
     def test_refresh_while_running_preserves_active_selection_and_config(self):
         self.devices()
@@ -634,31 +651,6 @@ class DesktopBackendTest(unittest.TestCase):
         self.assertEqual(state["selected"], previous)
         self.assertTrue(all(item["status"] == "unknown" for item in state["devices"]))
         self.assertFalse(state["scanning"])
-
-    def test_serial_reused_by_another_avd_cannot_launch_task(self):
-        self.devices()
-        with patch.object(desktop, "emulator_config_key", return_value="avd:another"), \
-                patch.object(desktop.subprocess, "Popen") as launch:
-            with self.assertRaisesRegex(ValueError, "连接标识已变化"):
-                self.api.start(desktop.default_config())
-            launch.assert_not_called()
-
-    def test_background_boot_checks_do_not_block_switching_or_second_launch(self):
-        self.devices()
-        with patch.object(desktop.threading, "Thread"):
-            self.api._begin_scan(background=True)
-        self.assertFalse(self.api.get_state()["scanning"])
-        self.api.select_device("emulator-5556", desktop.default_config())
-        self.assertEqual(self.api.get_state()["selected"], "emulator-5556")
-        self.api._devices[0]["status"] = "stopped"
-        process = Mock()
-        process.poll.return_value = None
-        with patch.object(desktop, "resolve_emulator", return_value=Path("sdk/emulator.exe")), \
-                patch.object(desktop.subprocess, "Popen", return_value=process), \
-                patch.object(self.api, "_monitor_launches"):
-            self.api.launch_emulator("emulator-5554")
-        self.assertEqual(self.api.get_state()["devices"][0]["status"], "starting")
-
 
 if __name__ == "__main__":
     unittest.main()
