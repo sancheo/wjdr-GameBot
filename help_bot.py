@@ -3318,28 +3318,27 @@ def warehouse_position(image):
                       for xx in range(x * 4 - 32, x * 4 + 33, 2))
     score, x, y = max((precise(gray.crop((xx, yy, xx + 160, yy + 120))), xx, yy)
                       for yy in range(y - 2, y + 3) for xx in range(x - 2, x + 3))
-    if score >= .78:
-        return x - 260, y - 1330
+    facade = (x - 260, y - 1330) if score >= .78 else None
     # Upgrading adds scaffolding across the facade. The distinctive roof vent
     # stays exposed; use its calibrated position with a stricter correlation.
     import cv2
     import numpy as np
     vent = open_template(ROOT / "assets/emulator-warehouse-roof-vent.png").convert("L")
     pixels = np.asarray(gray.crop((40, 350, 1040, 2050)))
-    scores = cv2.matchTemplate(pixels, np.asarray(vent), cv2.TM_CCOEFF_NORMED)
-    _, score, _, (x, y) = cv2.minMaxLoc(scores)
-    if score >= .85:
-        return x + 40 - 525, y + 350 - 1246
-    # Camera zoom changes the building and bubble together; keep using the
-    # real Nox vent while checking the nearby rendered scale explicitly.
-    for factor in (.9, 1.1):
+    # Both crops come from midday-world-scene.png: the vent is 244px right
+    # and 71px above the facade origin. Keep that shared calibration at every
+    # scale, and use one anchor whether scaffolding hides the facade or not.
+    candidates = []
+    for factor in (.9, 1., 1.04, 1.1, 1.14):
         scaled = vent.resize((round(vent.width * factor), round(vent.height * factor)), Image.Resampling.LANCZOS)
         scores = cv2.matchTemplate(pixels, np.asarray(scaled), cv2.TM_CCOEFF_NORMED)
         _, score, _, (x, y) = cv2.minMaxLoc(scores)
-        if score >= .9:
-            return (round(x + 40 - (525 - 260) * factor - 260),
-                    round(y + 350 - (1246 - 1330) * factor - 1330))
-    return None
+        candidates.append((score, factor, x, y))
+    score, factor, x, y = max(candidates)
+    if score >= .85:
+        return (round(x + 40 - 244 * factor - 260),
+                round(y + 350 + 71 * factor - 1330))
+    return facade
 
 
 def stamina_warehouse_visible(offset):

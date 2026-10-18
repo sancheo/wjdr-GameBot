@@ -12,12 +12,14 @@ def frame(name):
 
 class WarehouseConstructionTest(unittest.TestCase):
     def test_scaffold_views_locate_the_same_calibrated_building(self):
-        for name, expected in (("edge", (-332, -48)), ("visible", (-313, -467))):
+        for name, expected in (("edge", (-351, -56)), ("visible", (-302, -476))):
             for mode in ("RGB", "L"):
                 with self.subTest(view=name, mode=mode):
                     offset = bot.warehouse_position(frame(name).convert(mode))
                     self.assertEqual(offset, expected)
-                    self.assertTrue(bot.stamina_warehouse_visible(offset))
+                    # The new Nox calibration puts the edge view's can search
+                    # one pixel outside the safe margin, so it must be panned.
+                    self.assertEqual(bot.stamina_warehouse_visible(offset), name != "edge")
 
     def test_roof_and_facade_use_the_same_coordinate_system(self):
         with Image.open(bot.ROOT / "artifacts/stamina-ready.png") as image:

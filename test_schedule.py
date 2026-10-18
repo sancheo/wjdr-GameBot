@@ -895,7 +895,7 @@ class ScheduleTest(unittest.TestCase):
         away, ready, claimed = map(frame, ('after-training-back', 'stamina-ready', 'stamina-claimed'))
         self.assertIsNone(bot.warehouse_position(away))
         offset = bot.warehouse_position(ready)
-        self.assertEqual(offset, (-35, -263))
+        self.assertEqual(offset, (-41, -275))
         self.assertIsNotNone(bot.stamina_target(ready, offset))
         self.assertIsNone(bot.stamina_target(claimed, offset))
         self.assertIsNone(bot.warehouse_countdown(ready, offset=offset))

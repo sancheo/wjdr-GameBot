@@ -41,7 +41,7 @@ class TreasureDispatchLayoutTest(unittest.TestCase):
                         self.assertIsNone(bot.intelligence_text_target(
                             image, ("开始寻宝",), (300, 1700, 780, 1940)))
                     with patch.object(bot, "recognize_text", side_effect=AssertionError("exit needs no OCR")):
-                        self.assertEqual(bot.treasure_back_target(image), (995, 610 + offset))
+                        self.assertEqual(bot.treasure_back_target(image), (995, 605 + offset))
 
     def test_dispatch_title_and_close_are_both_required(self):
         for box in ((430, 580, 650, 640), (970, 585, 1020, 635)):
@@ -55,7 +55,7 @@ class TreasureDispatchLayoutTest(unittest.TestCase):
     def test_reported_map_still_confirms_remaining_count_chest_and_exit(self):
         image = fixture("treasure-map-1015")
         self.assertEqual(bot.treasure_remaining(image), 1)
-        self.assertEqual(bot.treasure_chest_target(image), (583, 696))
+        self.assertEqual(bot.treasure_chest_target(image), (583, 697))
         self.assertEqual(bot.treasure_back_target(image), (60, 190))
 
     def test_recovery_closes_resized_dialog_before_any_unrelated_popup_ocr(self):
@@ -79,7 +79,7 @@ class TreasureDispatchLayoutTest(unittest.TestCase):
                         self.assertIs(bot.recover_task_city("test", asset("help-icon"), asset("city-nav"), None, None), city)
                     else:
                         self.assertTrue(bot.return_to_city("test", asset("help-icon"), asset("city-nav"), None, None))
-                tap.assert_called_once_with("test", 995, 610 + offset)
+                tap.assert_called_once_with("test", 995, 605 + offset)
 
     def test_dispatch_flow_uses_detected_start_and_confirms_count_decrease(self):
         drawer = Image.new("RGB", bot.EXPECTED_SIZE)

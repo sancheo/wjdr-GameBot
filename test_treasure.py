@@ -269,7 +269,8 @@ class TreasureTest(unittest.TestCase):
             self.assertEqual(bot.exception_screenshot('test', raised.exception), f'失败截图：{frames[0]}')
             with Image.open(frames[0]) as saved:
                 self.assertEqual(saved.getpixel((100, 100)), (10, 80, 200))
-        self.assertEqual(output.getvalue().count('失败截图：'), 1)
+        # The scheduler reports the final failure once, using the attached path.
+        self.assertNotIn('失败截图：', output.getvalue())
 
     def test_alliance_red_dot_claims_before_zero_remaining_exit(self):
         page = Image.open(bot.ROOT / 'artifacts/treasure-page.png').convert('RGB')

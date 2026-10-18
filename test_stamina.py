@@ -157,8 +157,8 @@ class StaminaNavigationTest(unittest.TestCase):
                    for lighting in ('day', 'night')]
         for offset in offsets:
             self.assertIsNotNone(offset)
-            self.assertAlmostEqual(offset[0], 138, delta=6)
-            self.assertAlmostEqual(offset[1], 290, delta=6)
+            self.assertAlmostEqual(offset[0], 154, delta=6)
+            self.assertAlmostEqual(offset[1], 282, delta=6)
         for first, second in zip(*offsets):
             self.assertAlmostEqual(first, second, delta=5)
         self.assertTrue(all(bot.stamina_warehouse_visible(offset) for offset in offsets))
@@ -167,7 +167,7 @@ class StaminaNavigationTest(unittest.TestCase):
         offset = bot.warehouse_position(frame('stamina-facade-missed'))
         self.assertIsNotNone(offset)
         self.assertAlmostEqual(offset[0], -158, delta=4)
-        self.assertAlmostEqual(offset[1], 87, delta=4)
+        self.assertAlmostEqual(offset[1], 78, delta=4)
         self.assertTrue(bot.stamina_warehouse_visible(offset))
 
     def test_stamina_suspends_help_in_drawer_helpers_and_restores_on_error(self):
