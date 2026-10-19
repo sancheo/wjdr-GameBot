@@ -354,6 +354,8 @@ class UpdateManager:
                 self.state.update(phase='available' if release else 'current',
                                   message=f"发现新版本 v{release['version']}" if release else '当前已是最新正式版本',
                                   new_version=release['version'] if release else '', notes=release['notes'] if release else '')
+                if release and self.installable and not self.cancelled.is_set():
+                    self.download()
         except HTTPError as error:
             message = '仓库暂无可用的正式 Release，或仓库为私有仓库' if error.code == 404 else (
                 'GitHub 请求受限，请稍后再试' if error.code in (403, 429) else f'GitHub 检查失败（HTTP {error.code}）')
@@ -365,6 +367,8 @@ class UpdateManager:
         with self.lock:
             if not self.enabled or not self.installable:
                 raise ValueError('自动安装更新仅支持完整的 Windows 便携发行包')
+            if self.state['phase'] in ('downloading', 'ready') and not self.cancelled.is_set():
+                return self.snapshot()
             if self.state['phase'] not in ('available', 'error') or not self.release or self.cancelled.is_set():
                 raise ValueError('请先检查并选择可用的新版本')
             self.state.update(phase='downloading', message='正在下载更新，现有任务继续运行…', downloaded=0,
@@ -408,7 +412,7 @@ class UpdateManager:
                 self.plan.write_text(json.dumps(prepared, ensure_ascii=False), encoding='utf-8')
                 with self.lock:
                     self._check_download_cancelled()
-                    self._set(phase='ready', message='变更文件已校验。点击“安装并重启”将停止任务并更新程序。')
+                    self._set(phase='ready', message='变更文件已校验。点击“更新”将停止任务、安装并重启程序。')
                 return
             if shutil.disk_usage(self.root).free < release['size'] * 4 + 512 * 1024**2:
                 raise ValueError('磁盘空间不足，完整包更新需要更多可用空间')
@@ -448,7 +452,7 @@ class UpdateManager:
             archive.unlink()
             with self.lock:
                 self._check_download_cancelled()
-                self._set(phase='ready', message='更新包已校验。点击“安装并重启”将停止任务并更新程序。')
+                self._set(phase='ready', message='更新包已校验。点击“更新”将停止任务、安装并重启程序。')
         except Exception as error:
             if stage.exists() and stage.parent.resolve() == self.root:
                 shutil.rmtree(stage, ignore_errors=True)

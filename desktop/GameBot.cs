@@ -536,23 +536,34 @@ internal sealed class DesktopWindow : Form
                     document.getElementById('update-cancel').click(); render(fixture);
                     if (document.getElementById('update-dialog').open || downloaded || installed || label.textContent !== '有新版本：v1.0.1')
                         throw new Error('取消弹窗触发了更新或隐藏了新版入口');
+                    // A background download is visible and never installs by itself.
+                    fixture.update.phase='downloading'; fixture.update.downloaded=50; render(fixture);
                     badge.click();
+                    if (document.getElementById('update-progress').hidden ||
+                        document.getElementById('update-progress').value !== 50 || badge.disabled || installed || downloaded)
+                        throw new Error('后台下载进度或新版入口错误');
                     document.getElementById('update-action').click(); await mutation;
-                    fixture.update.downloaded=50; render(fixture);
-                    if (!downloaded || document.getElementById('update-progress').hidden ||
-                        document.getElementById('update-progress').value !== 50 || !document.getElementById('check-updates').disabled)
-                        throw new Error('下载按钮、进度或重复检查保护错误');
+                    if (!updateInstallRequested || installed || downloaded) throw new Error('等待下载时重复下载或提前安装');
+                    fixture.update.downloaded=75; render(fixture);
+                    if (document.getElementById('update-progress').value !== 75) throw new Error('进度未同步');
                     document.getElementById('update-cancel').click(); await mutation;
-                    if (!cancelled || document.getElementById('update-dialog').open || fixture.update.phase !== 'available')
-                        throw new Error('取消下载未传递到后台');
-                    badge.click(); document.getElementById('update-action').click(); await mutation;
-                    fixture.update.phase='error'; fixture.update.message='下载连接中断'; render(fixture);
+                    fixture.update.phase='ready'; render(fixture); await mutation;
+                    if (cancelled || installed || document.getElementById('update-dialog').open)
+                        throw new Error('取消后仍安装或中断后台下载');
+                    badge.click(); document.getElementById('update-action').click(); await mutation; render(fixture);
+                    if (!installed || !document.getElementById('update-action').disabled) throw new Error('已下载更新未直接安装');
+                    installed=false; fixture.update.phase='downloading'; render(fixture);
+                    document.getElementById('update-action').click(); await mutation;
+                    fixture.update.phase='ready'; render(fixture); await mutation; render(fixture);
+                    if (!installed || updateInstallRequested) throw new Error('下载完成后未继续安装');
+                    installed=false; fixture.update.phase='error'; fixture.update.message='下载连接中断'; render(fixture);
                     if (document.getElementById('update-message').hidden || document.getElementById('update-action').disabled)
                         throw new Error('下载错误或重试按钮缺失');
-                    fixture.update.phase='ready'; render(fixture);
-                    if (document.getElementById('update-action').textContent !== '安装并重启') throw new Error('安装按钮缺失');
-                    document.getElementById('update-action').click(); await mutation; render(fixture);
-                    if (!installed || !document.getElementById('update-action').disabled) throw new Error('安装操作或重复安装保护错误');
+                    document.getElementById('update-action').click(); await mutation;
+                    if (!downloaded || !updateInstallRequested) throw new Error('失败后未重新下载');
+                    fixture.update.phase='error'; render(fixture);
+                    fixture.update.phase='ready'; render(fixture); await mutation;
+                    if (installed) throw new Error('失败后仍自动安装');
                     fixture.update.phase='available'; fixture.update.installable=false; render(fixture);
                     if (!document.getElementById('update-action').disabled) throw new Error('源码模式允许自动安装');
                     window.checkedUpdates=true;
@@ -561,7 +572,7 @@ internal sealed class DesktopWindow : Form
         for (int i = 0; i < 200 && !await JsBool("window.checkedUpdates === true"); i++) await Task.Delay(50);
         if (!await JsBool("window.checkedUpdates === true"))
             throw new InvalidOperationException("更新界面自检失败：" + await view.CoreWebView2.ExecuteScriptAsync("window.checkedUpdates"));
-        Console.WriteLine("Update UI checks passed: spinner and fixed height, 3-second current status, persistent errors/new version, daily visible-window checks, modal, download/cancel/retry/install and source mode guards.");
+        Console.WriteLine("Update UI checks passed: spinner and fixed height, 3-second current status, persistent errors/new version, daily visible-window checks, modal, background download, live progress, cancel install, retry and install intent guards.");
         await view.CoreWebView2.ExecuteScriptAsync(@"
             window.checkedBear = false;
             (async () => {

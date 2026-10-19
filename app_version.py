@@ -1,5 +1,5 @@
 """Release identity shared by the GUI, updater and portable builder."""
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 REPOSITORY = "sancheo/wjdr-GameBot"
 UPDATE_PROTOCOL = 1

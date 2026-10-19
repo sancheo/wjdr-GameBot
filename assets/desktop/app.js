@@ -18,6 +18,7 @@ let syncTimer = null;
 let taskStatusKey = "";
 let updateState = null;
 let updateRequestPending = false;
+let updateInstallRequested = false;
 let updateCheckPending = false;
 let updateCheckError = "";
 let updateLabelPhase = "";
@@ -468,7 +469,7 @@ function renderUpdate(update) {
   updateState = update;
   const phase = updateCheckPending ? "checking" : updateCheckError ? "error" : update.phase;
   const checking = phase === "checking";
-  const busy = ["checking", "downloading", "cancelling", "installing"].includes(phase);
+  const busy = ["checking", "cancelling", "installing"].includes(phase);
   const hasUpdate = Boolean(update.new_version);
   if (phase !== updateLabelPhase) {
     clearTimeout(updateLabelTimer);
@@ -508,10 +509,12 @@ function renderUpdate(update) {
   $("update-progress").hidden = update.phase !== "downloading";
   $("update-progress").value = update.total ? Math.min(100, update.downloaded * 100 / update.total) : 0;
   const ready = update.phase === "ready";
-  $("update-action").disabled = updateRequestPending || !connected || !update.installable || !hasUpdate || !(ready || ["available", "error"].includes(update.phase));
+  if (["error", "cancelling", "available"].includes(update.phase) && !updateRequestPending) updateInstallRequested = false;
+  $("update-action").disabled = updateRequestPending || updateInstallRequested || !connected || !update.installable || !hasUpdate || !(ready || ["available", "error", "downloading"].includes(update.phase));
   $("update-action").title = update.installable ? "" : "当前运行目录不支持自动安装，请使用完整发行包";
-  $("update-action").textContent = ready ? "安装并重启" : update.phase === "installing" ? "正在安装…" : update.phase === "downloading" ? "正在更新…" : "更新";
+  $("update-action").textContent = update.phase === "installing" ? "正在安装…" : updateInstallRequested ? "下载完成后安装…" : "更新";
   $("update-cancel").disabled = updateRequestPending || ["cancelling", "installing"].includes(update.phase);
+  if (ready && updateInstallRequested && !updateRequestPending && connected) installRequestedUpdate();
 }
 
 async function checkUpdates() {
@@ -536,8 +539,9 @@ setInterval(checkUpdatesIfDue, 60 * 1000);
 document.addEventListener("visibilitychange", checkUpdatesIfDue);
 function dismissUpdate() {
   if ($("update-cancel").disabled) return;
-  if (updateState?.phase === "downloading") queue(async () => render(await window.pywebview.api.cancel_update_download()));
+  updateInstallRequested = false;
   $("update-dialog").close();
+  renderUpdate(updateState);
 }
 $("update-cancel").addEventListener("click", dismissUpdate);
 $("update-dialog").addEventListener("cancel", event => { event.preventDefault(); dismissUpdate(); });
@@ -548,17 +552,33 @@ $("check-updates").addEventListener("click", () => {
     if (!$("update-dialog").open) $("update-dialog").showModal();
   } else checkUpdates();
 });
-$("update-action").addEventListener("click", () => {
-  if (updateRequestPending || $("update-action").disabled) return;
-  const install = updateState?.phase === "ready";
+function installRequestedUpdate() {
+  updateInstallRequested = false;
   updateRequestPending = true;
   renderUpdate(updateState);
   queue(async () => {
     try {
-      if (install) {
-        await window.pywebview.api.install_update();
-        renderUpdate({...updateState, phase: "installing", message: "正在停止任务并安装更新，完成后自动打开新版…"});
-      } else render(await window.pywebview.api.download_update());
+      await window.pywebview.api.install_update();
+      renderUpdate({...updateState, phase: "installing", message: "正在停止任务并安装更新，完成后自动打开新版…"});
+    } finally {
+      updateRequestPending = false;
+      renderUpdate(updateState);
+    }
+  });
+}
+$("update-action").addEventListener("click", () => {
+  if (updateRequestPending || $("update-action").disabled) return;
+  updateInstallRequested = true;
+  if (updateState?.phase === "ready") { installRequestedUpdate(); return; }
+  if (updateState?.phase === "downloading") { renderUpdate(updateState); return; }
+  updateRequestPending = true;
+  renderUpdate(updateState);
+  queue(async () => {
+    try {
+      render(await window.pywebview.api.download_update());
+    } catch (error) {
+      updateInstallRequested = false;
+      throw error;
     } finally {
       updateRequestPending = false;
       renderUpdate(updateState);

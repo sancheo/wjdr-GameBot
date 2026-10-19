@@ -373,7 +373,8 @@ class UpdateTests(unittest.TestCase):
                 with patch.object(updates, 'open_url', side_effect=response), \
                         patch.object(updates.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(10**10, 0, 10**10)):
                     api.check_updates(); api._updates.thread.join(5)
-                    self.assertEqual(api.get_state()['update']['phase'], 'available')
+                    # Detection now starts downloading; an explicit legacy
+                    # download request must reuse it rather than restart it.
                     api.download_update(); api._updates.thread.join(5)
                 self.assertEqual(api.get_state()['update']['phase'], 'ready')
                 api._resume_state = 'starting'
@@ -386,6 +387,54 @@ class UpdateTests(unittest.TestCase):
                 self.assertTrue(plan.is_file())
                 self.assertTrue(api._updating)
             finally: api._resume_state = 'idle'; api._close()
+
+    def test_detection_downloads_once_without_installing_and_exposes_live_progress(self):
+        raw = package()
+        entered, resume = threading.Event(), threading.Event()
+
+        class SlowResponse(io.BytesIO):
+            def read(self, limit):
+                if self.tell():
+                    entered.set()
+                    if not resume.wait(5):
+                        raise TimeoutError('test download did not resume')
+                return super().read(min(limit, len(raw) // 2))
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'runtime/python').mkdir(parents=True)
+            (root / 'runtime/python/python.exe').touch()
+            (root / 'GameBot.Updater.exe').write_bytes(b'old')
+            api = gui_web.DesktopApi(root)
+            manager = api._updates
+            try:
+                with (patch.object(updates, 'read_url', return_value=json.dumps(release(payload=raw)).encode()),
+                      patch.object(updates, 'open_url', return_value=SlowResponse(raw)) as network,
+                      patch.object(updates.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(10**10, 0, 10**10))):
+                    api.check_updates()
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        state = api.get_state()['update']
+                        self.assertEqual(state['phase'], 'downloading')
+                        self.assertGreater(state['downloaded'], 0)
+                        self.assertLess(state['downloaded'], state['total'])
+                        worker = manager.thread
+                        api.download_update()
+                        api.check_updates()
+                        self.assertIs(worker, manager.thread)
+                        with self.assertRaisesRegex(ValueError, '尚未准备'): api.install_update()
+                        self.assertFalse(api._updating)
+                    finally:
+                        resume.set()
+                        manager.thread.join(5)
+                    self.assertEqual(manager.snapshot()['phase'], 'ready', manager.snapshot()['message'])
+                    api.download_update()
+                    self.assertEqual(network.call_count, 1)
+                    self.assertFalse(api._updating)
+                    self.assertEqual((root / 'GameBot.Updater.exe').read_bytes(), b'old')
+            finally:
+                resume.set()
+                api._close()
 
     def test_install_guard_blocks_new_tasks(self):
         with tempfile.TemporaryDirectory() as temp:
