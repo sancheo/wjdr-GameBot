@@ -103,14 +103,16 @@ def read_url(url, limit):
             time.sleep(0.5 * (attempt + 1))
 
 
-def open_url(url, *, method='GET'):
+def open_url(url, *, method='GET', headers=None):
     if not trusted_url(url):
         raise ValueError("更新地址必须是 GitHub 的 HTTPS 地址")
-    return build_opener(GithubRedirects(), HTTPSHandler(context=update_ssl_context())).open(Request(url, method=method, headers={
+    request_headers = {
         "User-Agent": "GameBot-Updater", "Accept": "application/vnd.github+json" if
         urlsplit(url).hostname == "api.github.com" else "application/octet-stream",
         "X-GitHub-Api-Version": "2026-03-10",
-    }), timeout=25)
+    }
+    request_headers.update(headers or {})
+    return build_opener(GithubRedirects(), HTTPSHandler(context=update_ssl_context())).open(Request(url, method=method, headers=request_headers), timeout=25)
 
 
 def asset_url(asset, tag):
@@ -145,10 +147,22 @@ def choose_release(data, current):
                      and a.get("state") == "uploaded"), None)
     if not sha and checksum is None:
         raise ValueError("更新包缺少 SHA-256 校验信息，请同时上传 .zip.sha256 附件")
-    return {"version": '.'.join(map(str, version)), "tag": tag, "name": name, "size": size,
+    selected = {"version": '.'.join(map(str, version)), "tag": tag, "name": name, "size": size,
             "url": asset_url(asset, tag), "sha256": sha,
             "checksum_url": asset_url(checksum, tag) if checksum else None,
             "notes": str(data.get("body") or "该版本未提供更新说明")[:6000]}
+    manifest_name = name.removesuffix('.zip') + '.files.json'
+    manifests = [a for a in assets if isinstance(a, dict) and a.get('name') == manifest_name and a.get('state') == 'uploaded']
+    if manifests:
+        if len(manifests) != 1:
+            raise ValueError('文件更新清单重复')
+        item = manifests[0]
+        digest = item.get('digest', '')
+        if not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-fA-F]{64}', digest):
+            # Releases always include a sidecar, including on older GitHub servers.
+            digest = None
+        selected['manifest'] = {'url': asset_url(item, tag), 'sha256': digest[7:] if digest else None}
+    return selected
 
 
 class ReleaseNotes(HTMLParser):
@@ -201,9 +215,11 @@ def public_latest_release(current):
         raise ValueError('SHA-256 校验附件格式不正确')
     with open_url(download, method='HEAD') as response:
         size = int(response.headers.get('Content-Length', '0'))
-    return choose_release({'tag_name': tag, 'body': ''.join(notes.parts).strip(),
+    selected = choose_release({'tag_name': tag, 'body': ''.join(notes.parts).strip(),
                            'assets': [{'name': name, 'state': 'uploaded', 'size': size,
                                        'browser_download_url': download, 'digest': 'sha256:' + fields[0]}]}, current)
+    selected['manifest_probe'] = True
+    return selected
 
 
 def extract_package(archive, destination, expected_version):
@@ -295,8 +311,8 @@ class UpdateManager:
             return deepcopy(self.state)
 
     def cleanup_completed(self):
-        for stage in self.root.glob('.update-stage-*'):
-            if not re.fullmatch(r'\.update-stage-[0-9a-f]{32}', stage.name) or stage.is_symlink():
+        for stage in (*self.root.glob('.update-stage-*'), *self.root.glob('.u-*')):
+            if not re.fullmatch(r'(\.update-stage-[0-9a-f]{32}|\.u-[0-9a-f]{12})', stage.name) or stage.is_symlink():
                 continue
             if not (stage / 'completed').is_file() and not (stage / 'cancelled').is_file():
                 continue
@@ -370,13 +386,32 @@ class UpdateManager:
             raise DownloadCancelled('下载已取消')
 
     def _download(self, release):
-        stage = self.root / ('.update-stage-' + uuid.uuid4().hex)
+        stage = self.root / ('.u-' + uuid.uuid4().hex[:12])
         try:
             self._check_download_cancelled()
-            if shutil.disk_usage(self.root).free < release['size'] * 4 + 512 * 1024**2:
+            required_space = (64 * 1024**2 if release.get('manifest') or release.get('manifest_probe')
+                              else release['size'] * 4 + 512 * 1024**2)
+            if shutil.disk_usage(self.root).free < required_space:
                 raise ValueError('磁盘空间不足，请至少保留更新包大小四倍加 512 MiB 的空间')
             stage.mkdir()
             self.stage = stage
+            from file_updates import prepare_file_update, RangeUnsupported
+            try:
+                prepared = prepare_file_update(self, release, stage)
+            except RangeUnsupported:
+                shutil.rmtree(stage / 'payload', ignore_errors=True)
+                self._set(downloaded=0, total=release['size'], message='服务器不支持差异下载，正在下载完整更新包…')
+                prepared = None
+            if prepared is not None:
+                shutil.copy2(self.root / 'GameBot.Updater.exe', stage / 'GameBot.Updater.exe')
+                self.plan = stage / 'update-plan.json'
+                self.plan.write_text(json.dumps(prepared, ensure_ascii=False), encoding='utf-8')
+                with self.lock:
+                    self._check_download_cancelled()
+                    self._set(phase='ready', message='变更文件已校验。点击“安装并重启”将停止任务并更新程序。')
+                return
+            if shutil.disk_usage(self.root).free < release['size'] * 4 + 512 * 1024**2:
+                raise ValueError('磁盘空间不足，完整包更新需要更多可用空间')
             expected = release['sha256']
             if not expected:
                 checksum = read_url(release['checksum_url'], 4097)

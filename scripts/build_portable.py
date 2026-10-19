@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from app_version import VERSION, REPOSITORY, UPDATE_PROTOCOL
 from app_updates import version_tuple
+from file_updates import build_manifest, inventory_paths
 VC_DLLS = (
     "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
     "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "concrt140.dll",
@@ -237,6 +238,8 @@ def finish_build(destination):
     version = json.loads((destination / "release.json").read_text(encoding="utf-8"))["version"]
     version_tuple(version)
     archive = destination.parent / f"GameBot-Windows-x64-v{version}.zip"
+    (destination / 'assets/update-files.json').write_text(
+        json.dumps(inventory_paths(destination), ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     print(f"Creating archive: {archive}", flush=True)
     # Include hidden .tools explicitly. Exclude all state created by the self-check.
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as output:
@@ -253,6 +256,8 @@ def finish_build(destination):
     with archive.open('rb') as source:
         digest = hashlib.file_digest(source, 'sha256').hexdigest()
     archive.with_suffix('.zip.sha256').write_text(digest + '  ' + archive.name + '\n', encoding='ascii')
+    manifest = build_manifest(archive)
+    print(f"File update manifest: {manifest}", flush=True)
     print(f"Built: {archive}\nSize: {archive.stat().st_size / 1024**2:.1f} MiB", flush=True)
     return archive
 

@@ -36,6 +36,8 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
+        AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
         CheckStartup = Array.IndexOf(args, "--check-startup") >= 0;
         CheckLogs = Array.IndexOf(args, "--check-logs") >= 0;
         CheckUi = CheckStartup || CheckLogs || Array.IndexOf(args, "--check-ui") >= 0;
@@ -341,7 +343,9 @@ internal sealed class DesktopWindow : Form
         {
             string stage = Path.GetDirectoryName(Path.GetFullPath(plan));
             if (!Program.Portable || Program.CheckUi || Path.GetDirectoryName(stage) != Program.Root.TrimEnd(Path.DirectorySeparatorChar) ||
-                !Path.GetFileName(stage).StartsWith(".update-stage-") || Path.GetFileName(plan) != "update-plan.json")
+                !(Path.GetFileName(stage).StartsWith(".update-stage-") ||
+                  System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(stage), @"^\.u-[0-9a-f]{12}$")) ||
+                Path.GetFileName(plan) != "update-plan.json")
                 throw new InvalidOperationException("更新计划目录不正确。");
             var start = new ProcessStartInfo(Path.Combine(stage, "GameBot.Updater.exe"),
                 "\"" + plan + "\" " + Process.GetCurrentProcess().Id) { UseShellExecute = false, WorkingDirectory = stage };
