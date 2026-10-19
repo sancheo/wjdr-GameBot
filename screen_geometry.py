@@ -160,6 +160,12 @@ def _matches(image, top_shift, bottom_shift):
             # Tiers change the name prefix. The unit suffix still anchors the
             # same training layout before that tier has its own captured title.
             crop, target = crop[:, 140:], target[:, 140:]
+        if name == "treasure-completed-title":
+            # The pet and mountain behind this title vary by treasure level.
+            # Only the white completion lettering identifies the centered modal.
+            crop, target = crop[:, 35:-35], target[:70, 35:-35]
+            crop = np.where(crop > 230, 255, 0).astype(np.uint8)
+            target = np.where(target > 230, 255, 0).astype(np.uint8)
         if kind == "drawer":
             # The panel is translucent: buildings and timers behind the handle
             # change every frame. Its white arrow is the stable landmark.

@@ -22,10 +22,13 @@ img { object-fit: contain; flex: 0 0 auto; }
 .logo { width: 46px; height: 46px; }
 .branding h1 { font-size: 29px; line-height: 1.35; letter-spacing: -.6px; }
 .branding p { color: var(--muted); margin-top: 2px; font-size: 14px; }
-.version-check { padding: 0; border: 0; color: inherit; background: transparent; }
+.version-check { display: inline-flex; align-items: center; justify-content: center; vertical-align: bottom; height: 20px; line-height: 20px; min-width: 48px; max-width: 100%; padding: 0; border: 0; color: inherit; background: transparent; }
+.version-check.alert { color: var(--red); }
+.version-check.alert:hover:not(:disabled) { color: var(--red); }
+.version-check #app-version { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.version-spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: version-spin .7s linear infinite; }
+@keyframes version-spin { to { transform: rotate(360deg); } }
 .version-check:hover:not(:disabled) { color: var(--blue); text-decoration: underline; }
-.update-badge { margin-left: auto; flex-shrink: 0; padding: 8px 4px; border: 0; background: transparent; color: #cf2838; font-weight: 700; font-size: 15px; }
-.update-badge:hover { text-decoration: underline; }
 .panel { border: 1px solid var(--border); border-radius: 14px; background: var(--white); }
 .device-panel { padding: 17px; display: grid; grid-template-columns: 42px minmax(0, 1fr); column-gap: 17px; row-gap: 10px; align-items: start; }
 .device-icon { width: 42px; height: 42px; }

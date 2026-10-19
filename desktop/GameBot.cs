@@ -479,25 +479,58 @@ internal sealed class DesktopWindow : Form
                     api.cancel_update_download = async () => {cancelled=true; fixture.update.phase='available'; return fixture;};
                     api.install_update = async () => {installed=true; fixture.update.phase='installing'; return {};};
                     render(fixture);
-                    if (!document.getElementById('new-version').hidden || document.getElementById('update-dialog').open ||
-                        document.getElementById('update-panel')) throw new Error('无更新时仍显示更新提示');
-                    fixture.update.phase='current'; fixture.update.installable=false; render(fixture);
-                    if (!document.getElementById('new-version').hidden || document.body.innerText.includes('当前已是最新正式版本') ||
-                        document.body.innerText.includes('自动安装仅支持便携发行版')) throw new Error('最新版本提示未移除');
-                    fixture.update.installable=true;
-                    document.getElementById('check-updates').click(); await mutation;
-                    if (!checked || document.getElementById('app-version').textContent !== 'v1.0.0' ||
-                        document.getElementById('new-version').hidden || document.getElementById('update-dialog').open || document.querySelector('#update-notes script') ||
-                        document.getElementById('update-notes').textContent !== '<script>unsafe()</script>')
-                        throw new Error('版本、更新说明或检查按钮错误');
-                    const badge = document.getElementById('new-version');
-                    if (getComputedStyle(badge).color !== 'rgb(207, 40, 56)' || badge.textContent !== '新版本' ||
-                        !document.querySelector('.branding').contains(badge)) throw new Error('标题右上角新版红字缺失');
+                    const badge = document.getElementById('check-updates');
+                    const label = document.getElementById('app-version');
+                    const height = badge.getBoundingClientRect().height;
+                    if (document.getElementById('new-version') || document.getElementById('update-dialog').open)
+                        throw new Error('旧的标题栏更新入口仍存在');
+                    let finishCheck;
+                    api.check_updates = () => {checked=true; return new Promise(resolve => {finishCheck=resolve;});};
+                    badge.click();
+                    if (!badge.disabled || !label.hidden || badge.querySelector('.version-spinner').hidden ||
+                        getComputedStyle(badge.querySelector('.version-spinner')).animationName !== 'version-spin' ||
+                        badge.getBoundingClientRect().height !== height) throw new Error('检查中动画或高度错误');
+                    Object.assign(fixture.update, {phase:'current', message:'当前已是最新正式版本'});
+                    finishCheck(fixture); await new Promise(resolve => setTimeout(resolve, 0));
+                    if (label.textContent !== '已是最新版本' || label.hidden || badge.getBoundingClientRect().height !== height)
+                        throw new Error('最新版本提示或高度错误');
+                    await new Promise(resolve => setTimeout(resolve, 3100)); render(fixture);
+                    if (label.textContent !== 'v1.0.0') throw new Error('三秒后未恢复版本号');
+                    fixture.update.phase='error'; fixture.update.message='网络连接失败'; render(fixture); render(fixture);
+                    if (label.textContent !== '网络连接失败' || getComputedStyle(badge).color !== 'rgb(231, 71, 79)')
+                        throw new Error('异常红字未持续显示');
+                    api.check_updates = async () => {throw new Error('桥接请求异常');};
+                    await checkUpdates(); render(fixture);
+                    if (label.textContent !== '桥接请求异常' || badge.disabled) throw new Error('请求异常未显示或不可重试');
+                    api.check_updates = async () => {checked=true; Object.assign(fixture.update, {
+                        phase:'available', new_version:'1.0.1', notes:'<script>unsafe()</script>', message:'发现新版本'}); return fixture;};
+                    await checkUpdates(); render(fixture);
+                    if (!checked || label.textContent !== '有新版本：v1.0.1' ||
+                        document.getElementById('update-dialog').open || document.querySelector('#update-notes script') ||
+                        document.getElementById('update-notes').textContent !== '<script>unsafe()</script>' ||
+                        getComputedStyle(badge).color !== 'rgb(231, 71, 79)') throw new Error('新版本红字或更新说明错误');
+                    const recentCheck = lastUpdateCheck;
+                    checked=false; checkUpdatesIfDue();
+                    if (checked) throw new Error('未到每日间隔却重复检查');
+                    const savedVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+                    try {
+                        lastUpdateCheck = Date.now() - autoUpdateInterval;
+                        Object.defineProperty(document, 'visibilityState', {configurable:true, value:'hidden'});
+                        checkUpdatesIfDue();
+                        if (checked) throw new Error('窗口后台仍自动检测');
+                        Object.defineProperty(document, 'visibilityState', {configurable:true, value:'visible'});
+                        checkUpdatesIfDue(); await new Promise(resolve => setTimeout(resolve, 0));
+                        if (!checked) throw new Error('窗口可见时每日检测未触发');
+                    } finally {
+                        if (savedVisibility) Object.defineProperty(document, 'visibilityState', savedVisibility);
+                        else delete document.visibilityState;
+                        lastUpdateCheck = recentCheck;
+                    }
                     badge.click();
                     if (!document.getElementById('update-dialog').open || document.getElementById('update-version').textContent !== 'v1.0.1' ||
                         document.getElementById('update-action').textContent !== '更新') throw new Error('新版弹窗或更新按钮缺失');
                     document.getElementById('update-cancel').click(); render(fixture);
-                    if (document.getElementById('update-dialog').open || downloaded || installed || badge.hidden)
+                    if (document.getElementById('update-dialog').open || downloaded || installed || label.textContent !== '有新版本：v1.0.1')
                         throw new Error('取消弹窗触发了更新或隐藏了新版入口');
                     badge.click();
                     document.getElementById('update-action').click(); await mutation;
@@ -521,10 +554,10 @@ internal sealed class DesktopWindow : Form
                     window.checkedUpdates=true;
                 } finally {document.getElementById('update-dialog').close(); Object.assign(api, saved); render(original);}
             })().catch(error => {window.checkedUpdates=String(error);});");
-        for (int i = 0; i < 100 && !await JsBool("window.checkedUpdates === true"); i++) await Task.Delay(50);
+        for (int i = 0; i < 200 && !await JsBool("window.checkedUpdates === true"); i++) await Task.Delay(50);
         if (!await JsBool("window.checkedUpdates === true"))
             throw new InvalidOperationException("更新界面自检失败：" + await view.CoreWebView2.ExecuteScriptAsync("window.checkedUpdates"));
-        Console.WriteLine("Update UI checks passed: quiet current version, red new-version entry, modal, cancel/reopen, notes as text, download/cancel/retry/install, progress and source mode guards.");
+        Console.WriteLine("Update UI checks passed: spinner and fixed height, 3-second current status, persistent errors/new version, daily visible-window checks, modal, download/cancel/retry/install and source mode guards.");
         await view.CoreWebView2.ExecuteScriptAsync(@"
             window.checkedBear = false;
             (async () => {

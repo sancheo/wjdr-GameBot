@@ -4,6 +4,7 @@ from copy import deepcopy
 import hashlib
 import hmac
 from http.client import IncompleteRead
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -102,10 +103,10 @@ def read_url(url, limit):
             time.sleep(0.5 * (attempt + 1))
 
 
-def open_url(url):
+def open_url(url, *, method='GET'):
     if not trusted_url(url):
         raise ValueError("更新地址必须是 GitHub 的 HTTPS 地址")
-    return build_opener(GithubRedirects(), HTTPSHandler(context=update_ssl_context())).open(Request(url, headers={
+    return build_opener(GithubRedirects(), HTTPSHandler(context=update_ssl_context())).open(Request(url, method=method, headers={
         "User-Agent": "GameBot-Updater", "Accept": "application/vnd.github+json" if
         urlsplit(url).hostname == "api.github.com" else "application/octet-stream",
         "X-GitHub-Api-Version": "2026-03-10",
@@ -148,6 +149,61 @@ def choose_release(data, current):
             "url": asset_url(asset, tag), "sha256": sha,
             "checksum_url": asset_url(checksum, tag) if checksum else None,
             "notes": str(data.get("body") or "该版本未提供更新说明")[:6000]}
+
+
+class ReleaseNotes(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'div':
+            if self.depth:
+                self.depth += 1
+            elif dict(attrs).get('data-test-selector') == 'body-content':
+                self.depth = 1
+
+    def handle_endtag(self, tag):
+        if self.depth and tag in ('p', 'li', 'pre', 'h1', 'h2', 'h3'):
+            self.parts.append('\n')
+        if self.depth and tag == 'div':
+            self.depth -= 1
+
+    def handle_data(self, data):
+        if self.depth:
+            self.parts.append(data)
+
+
+def public_latest_release(current):
+    """Public release pages/downloads have no unauthenticated API quota."""
+    base = f'https://github.com/{REPOSITORY}/releases/'
+    with open_url(base + 'latest') as response:
+        url = response.geturl()
+        prefix = base + 'tag/'
+        if not url.startswith(prefix):
+            raise ValueError('正式版本页面未返回配置仓库的版本标签')
+        tag = url[len(prefix):]
+        version = version_tuple(tag)
+        if version <= version_tuple(current):
+            return None
+        raw = response.read(2 * 1024 * 1024 + 1)
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError('GitHub 正式版本页面过大')
+    notes = ReleaseNotes()
+    notes.feed(raw.decode('utf-8'))
+    name = f"GameBot-Windows-x64-v{'.'.join(map(str, version))}.zip"
+    download = base + 'download/' + tag + '/' + name
+    checksum = read_url(download + '.sha256', 4097)
+    fields = checksum.decode('ascii').split()
+    if (len(checksum) > 4096 or not fields or not re.fullmatch('[0-9a-fA-F]{64}', fields[0])
+            or len(fields) > 2 or (len(fields) == 2 and fields[1].lstrip('*') != name)):
+        raise ValueError('SHA-256 校验附件格式不正确')
+    with open_url(download, method='HEAD') as response:
+        size = int(response.headers.get('Content-Length', '0'))
+    return choose_release({'tag_name': tag, 'body': ''.join(notes.parts).strip(),
+                           'assets': [{'name': name, 'state': 'uploaded', 'size': size,
+                                       'browser_download_url': download, 'digest': 'sha256:' + fields[0]}]}, current)
 
 
 def extract_package(archive, destination, expected_version):
@@ -268,10 +324,15 @@ class UpdateManager:
 
     def _check(self):
         try:
-            raw = read_url(f'https://api.github.com/repos/{REPOSITORY}/releases/latest', 1024 * 1024 + 1)
-            if len(raw) > 1024 * 1024:
-                raise ValueError('GitHub 版本响应过大')
-            release = choose_release(json.loads(raw), self.version)
+            try:
+                raw = read_url(f'https://api.github.com/repos/{REPOSITORY}/releases/latest', 1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    raise ValueError('GitHub 版本响应过大')
+                release = choose_release(json.loads(raw), self.version)
+            except HTTPError as error:
+                if error.code not in (403, 429):
+                    raise
+                release = public_latest_release(self.version)
             with self.lock:
                 self.release = release
                 self.state.update(phase='available' if release else 'current',

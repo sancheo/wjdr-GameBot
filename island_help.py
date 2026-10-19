@@ -23,10 +23,11 @@ def features(image, name):
     return pixels.astype(np.uint8)
 
 
-def locate(bot, image, name, box, threshold=.90):
+def locate(bot, image, name, box, threshold=.90, feature_name=None):
     scene, to_logical = view(image)
     template = bot.open_template(bot.ROOT / f'assets/emulator-island-help-{name}.png').convert('RGB')
-    result = cv2.matchTemplate(features(scene.crop(box), name), features(template, name),
+    feature_name = feature_name or name
+    result = cv2.matchTemplate(features(scene.crop(box), feature_name), features(template, feature_name),
                                cv2.TM_CCOEFF_NORMED)
     _, score, _, point = cv2.minMaxLoc(result)
     if score < threshold:
@@ -44,8 +45,12 @@ def trophy(bot, image):
 
 
 def visitor(bot, image):
+    # The warning control can have a grey background. Its white symbol stays
+    # unchanged, while Canny also includes the changing background edges.
     return (trophy(bot, image) is not None
-            and locate(bot, image, 'visitor', (930, 1350, 1080, 2000), .78) is not None)
+            and (locate(bot, image, 'visitor', (930, 1350, 1080, 2000), .78) is not None
+                 or locate(bot, image, 'visitor', (930, 1350, 1080, 2000), .90,
+                           feature_name='heart-white') is not None))
 
 
 def trophy_badge(bot, image):
@@ -107,6 +112,12 @@ def heart(bot, image):
         target = locate(bot, image, f'heart-{state}', (930, 1050, 1080, 1750), .86 if state == 'white' else .92)
         if target is not None:
             return state, target
+    # Snow behind the control merges with its white fill. The dark outline
+    # still distinguishes the unliked heart from the differently shaded red one.
+    target = locate(bot, image, 'heart-white', (930, 1050, 1080, 1750), .85,
+                    feature_name='visitor')
+    if target is not None:
+        return 'white', target
     return None, None
 
 

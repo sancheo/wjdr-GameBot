@@ -11,6 +11,38 @@ from test_help_bot import Clock
 
 
 class GatherTest(unittest.TestCase):
+    def test_monitor_dispatches_only_available_configured_item(self):
+        from unittest.mock import Mock
+        frame = self.frame('gather-live-start')
+        monitor = Mock()
+        monitor.available_steps.return_value = [(2, ('coal', 3))]
+        with (patch.object(bot, 'enter_wilderness', return_value=frame),
+              patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'town_button', return_value=True),
+              patch.object(bot, 'intelligence_queue_full', return_value=False),
+              patch.object(bot, 'prepare_gather_search', return_value=frame) as prepare,
+              patch.object(bot, 'search_gather_target', return_value=(frame, (540, 1245), None)),
+              patch.object(bot, 'gather_notice', return_value=None),
+              patch.object(bot, 'gather_search_page', return_value=False),
+              patch.object(bot, 'intelligence_text_target', return_value=(825, 2240)),
+              patch.object(bot, 'task_tap'), contextlib.redirect_stdout(io.StringIO())):
+            bot.run_gather('test', *([None] * 4),
+                           steps=[('meat', 8), ('wood', 8), ('coal', 3)], return_monitor=monitor)
+        self.assertEqual([(call.args[2], call.args[3]) for call in prepare.call_args_list], [('coal', 3)])
+        monitor.dispatched.assert_called_once_with(frame, frame, step=2)
+
+    def test_monitor_with_all_items_out_does_not_click_search(self):
+        from unittest.mock import Mock
+        frame = self.frame('gather-live-start')
+        monitor = Mock()
+        monitor.available_steps.return_value = []
+        with (patch.object(bot, 'enter_wilderness', return_value=frame),
+              patch.object(bot, 'task_screen', return_value=frame),
+              patch.object(bot, 'town_button', return_value=True),
+              patch.object(bot, 'task_tap') as tap):
+            bot.run_gather('test', *([None] * 4), return_monitor=monitor)
+        tap.assert_not_called()
+
     def test_unknown_capacity_stops_before_search(self):
         frame = object()
         with (patch.object(bot, 'task_screen', return_value=frame),

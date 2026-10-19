@@ -13,8 +13,7 @@
   <main class="shell">
     <header class="branding">
       <img src="gamebot-icon.png" alt="" class="logo">
-      <div><h1>无尽冬日 GameBot</h1><p>自动任务控制台 · <button id="check-updates" class="version-check" aria-label="检查更新" title="点击检查更新" disabled><span id="app-version">正在读取版本…</span></button></p></div>
-      <button id="new-version" class="update-badge" aria-haspopup="dialog" aria-controls="update-dialog" hidden>新版本</button>
+      <div><h1>无尽冬日 GameBot</h1><p>自动任务控制台 · <button id="check-updates" class="version-check" aria-label="检查更新" title="点击检查更新" disabled><span id="app-version" role="status" aria-live="polite">正在读取版本…</span><span class="version-spinner" aria-hidden="true" hidden></span></button></p></div>
     </header>
     <section class="panel device-panel" aria-label="安卓设备与运行控制">
       <img src="ui/monitor.png" alt="" class="device-icon">

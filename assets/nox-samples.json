@@ -1055,5 +1055,77 @@
     ],
     "device": "127.0.0.1:62025",
     "model": "SM-G977N"
+  },
+  "gather-march-meat": {
+    "native": "tests/fixtures/nox/20261018-131652-404691/tour-gather-078-native.png",
+    "normalized": "tests/fixtures/nox/gather-resource-march-icons-scene.png",
+    "box": [
+      24,
+      626,
+      78,
+      674
+    ],
+    "device": "127.0.0.1:62025",
+    "space": "unwarped-scene",
+    "native_box": [
+      24,
+      416,
+      78,
+      464
+    ]
+  },
+  "gather-march-wood": {
+    "native": "tests/fixtures/nox/20261018-131652-404691/tour-gather-078-native.png",
+    "normalized": "tests/fixtures/nox/gather-resource-march-icons-scene.png",
+    "box": [
+      24,
+      720,
+      78,
+      768
+    ],
+    "device": "127.0.0.1:62025",
+    "space": "unwarped-scene",
+    "native_box": [
+      24,
+      510,
+      78,
+      558
+    ]
+  },
+  "gather-march-coal": {
+    "native": "tests/fixtures/nox/20261018-131652-404691/tour-gather-078-native.png",
+    "normalized": "tests/fixtures/nox/gather-resource-march-icons-scene.png",
+    "box": [
+      24,
+      810,
+      78,
+      858
+    ],
+    "device": "127.0.0.1:62025",
+    "space": "unwarped-scene",
+    "native_box": [
+      24,
+      600,
+      78,
+      648
+    ]
+  },
+  "gather-march-iron": {
+    "native": "tests/fixtures/nox/20261018-131652-404691/tour-gather-078-native.png",
+    "normalized": "tests/fixtures/nox/gather-resource-march-icons-scene.png",
+    "box": [
+      24,
+      900,
+      78,
+      948
+    ],
+    "device": "127.0.0.1:62025",
+    "space": "unwarped-scene",
+    "native_box": [
+      24,
+      690,
+      78,
+      738
+    ]
   }
 }

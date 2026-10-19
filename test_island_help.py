@@ -22,6 +22,18 @@ def frame(name, directory=SAMPLES):
 
 
 class IslandHelpTest(unittest.TestCase):
+    def test_live_white_heart_is_recognized_against_snow(self):
+        with Image.open(bot.ROOT / 'tests/fixtures/nox/island-help-white-heart-1019-native.png') as native:
+            image = ScreenAdapter().frame('small', native.convert('RGB'))
+        self.assertEqual(island.heart(bot, image)[0], 'white')
+
+    def test_live_grey_warning_control_identifies_visitor_island(self):
+        with Image.open(bot.ROOT / 'tests/fixtures/nox/island-help-visitor-grey-1019-native.png') as native:
+            image = ScreenAdapter().frame('small', native.convert('RGB'))
+        self.assertTrue(island.visitor(bot, image))
+        self.assertIsNotNone(island.tend_target(bot, image))
+        self.assertEqual(island.heart(bot, image)[0], 'white')
+
     def assert_icon_center(self, actual, expected):
         self.assertIsNotNone(actual)
         self.assertLessEqual(abs(actual[0] - expected[0]), 4)

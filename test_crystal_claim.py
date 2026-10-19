@@ -15,6 +15,28 @@ def frame(name):
 
 
 class CrystalClaimTest(unittest.TestCase):
+    def nox_frame(self, name):
+        from screen_geometry import ScreenAdapter
+        with Image.open(bot.ROOT / f"tests/fixtures/nox/crystal-1019-{name}-native.png") as image:
+            return ScreenAdapter().frame("small-nox", image.convert("RGB"))
+
+    def test_small_nox_crystal_remains_collectible_beside_upgrade_arrow(self):
+        target = bot.crystal_target(self.nox_frame("before"), self.template("crystal-claim"))
+        self.assertIsNotNone(target)
+        self.assertLess(abs(target[0] - 525), 5)
+        self.assertLess(abs(target[1] - 735), 5)
+
+    def test_small_nox_upgrade_arrow_is_not_another_crystal(self):
+        before, after = self.nox_frame("before"), self.nox_frame("after")
+        template = self.template("crystal-claim")
+        self.assertIsNone(bot.crystal_target(after, template))
+        with (patch.object(bot, "task_screen", return_value=after),
+              patch.object(bot, "task_tap") as tap):
+            self.assertIs(bot.collect_crystals("small-nox", before,
+                          self.template("island-title").convert("L")), after)
+        tap.assert_called_once()
+        self.assertLess(abs(tap.call_args.args[1] - 525), 5)
+
     def template(self, name):
         return bot.open_template(bot.ROOT / f"assets/emulator-{name}.png")
 

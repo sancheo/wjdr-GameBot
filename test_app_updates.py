@@ -12,7 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 import zipfile
 
@@ -53,6 +53,72 @@ class UpdateTests(unittest.TestCase):
         version = patch.object(updates, 'VERSION', '1.0.0')
         version.start()
         self.addCleanup(version.stop)
+
+    def test_api_rate_limit_uses_public_release_without_credentials(self):
+        for status in (403, 429):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp:
+                manager = updates.UpdateManager(temp)
+                chosen = updates.choose_release(release(), manager.version)
+                with (patch.object(updates, 'read_url', side_effect=HTTPError('api', status, 'limited', {}, None)),
+                      patch.object(updates, 'public_latest_release', return_value=chosen) as fallback):
+                    manager._check()
+                fallback.assert_called_once_with('1.0.0')
+                self.assertEqual(manager.snapshot()['phase'], 'available')
+                self.assertEqual(manager.snapshot()['new_version'], '1.0.1')
+
+    def test_public_release_checks_official_tag_checksum_size_and_notes(self):
+        page = io.BytesIO(b'<div data-test-selector="body-content"><p>Fix &amp; update</p><ul><li>Keep configs</li></ul></div><p>Outside</p>')
+        page.geturl = lambda: f'https://github.com/{REPOSITORY}/releases/tag/v1.0.1'
+        checksum = io.BytesIO(('a' * 64 + '  GameBot-Windows-x64-v1.0.1.zip\n').encode())
+        head = io.BytesIO()
+        head.headers = {'Content-Length': '12345'}
+        with patch.object(updates, 'open_url', side_effect=[page, checksum, head]) as network:
+            chosen = updates.public_latest_release('1.0.0')
+        self.assertEqual(chosen['version'], '1.0.1')
+        self.assertEqual(chosen['sha256'], 'a' * 64)
+        self.assertEqual(chosen['size'], 12345)
+        self.assertEqual(chosen['notes'], 'Fix & update\nKeep configs')
+        self.assertEqual(network.call_args_list[-1].kwargs, {'method': 'HEAD'})
+        self.assertTrue(all(response.closed for response in (page, checksum, head)))
+
+    def test_public_release_current_version_does_not_read_or_probe_assets(self):
+        page = io.BytesIO()
+        page.geturl = lambda: f'https://github.com/{REPOSITORY}/releases/tag/v1.0.0'
+        page.read = lambda limit: self.fail('current release needs no body')
+        with patch.object(updates, 'open_url', return_value=page) as network:
+            self.assertIsNone(updates.public_latest_release('1.0.0'))
+        network.assert_called_once()
+        self.assertTrue(page.closed)
+
+    def test_public_release_rejects_other_repository_and_nonfinal_tags(self):
+        for url in ('https://github.com/other/repo/releases/tag/v1.0.1',
+                    f'https://github.com/{REPOSITORY}/releases/tag/v1.0.1-beta'):
+            with self.subTest(url=url):
+                page = io.BytesIO()
+                page.geturl = lambda: url
+                with patch.object(updates, 'open_url', return_value=page) as network:
+                    with self.assertRaises(ValueError): updates.public_latest_release('1.0.0')
+                network.assert_called_once()
+
+    def test_public_release_rejects_bad_checksum_and_invalid_size(self):
+        for checksum, size in ((b'bad', '123'), (b'a' * 64 + b' other.zip', '123'),
+                               (b'a' * 64, '0'), (b'a' * 64, str(updates.MAX_DOWNLOAD + 1))):
+            with self.subTest(checksum=checksum, size=size):
+                page = io.BytesIO(b'')
+                page.geturl = lambda: f'https://github.com/{REPOSITORY}/releases/tag/v1.0.1'
+                head = io.BytesIO()
+                head.headers = {'Content-Length': size}
+                with patch.object(updates, 'open_url', side_effect=[page, io.BytesIO(checksum), head]):
+                    with self.assertRaises(ValueError): updates.public_latest_release('1.0.0')
+
+    def test_failed_public_fallback_does_not_advertise_an_update(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = updates.UpdateManager(temp)
+            with (patch.object(updates, 'read_url', side_effect=HTTPError('api', 403, 'limited', {}, None)),
+                  patch.object(updates, 'public_latest_release', side_effect=ValueError('invalid checksum'))):
+                manager._check()
+            self.assertEqual(manager.snapshot()['phase'], 'error')
+            self.assertEqual(manager.snapshot()['new_version'], '')
 
     def test_check_recovers_from_tls_eof_and_interrupted_body(self):
         for during_read in (False, True):

@@ -1538,7 +1538,11 @@ def run_gather(serial, help_template, nav_template, text_template, reconnect_tem
     if any(type(level) is not int or not 1 <= level <= 8 for _, level in steps):
         raise ValueError("资源采集等级必须是 1 到 8 的整数")
     image = enter_wilderness(serial, task_screen(serial), help_template, nav_template, "资源采集")
-    for resource, level in steps:
+    selected = (return_monitor.available_steps(image) if return_monitor is not None
+                else list(enumerate(steps)))
+    for step_index, (resource, level) in selected:
+        if return_monitor is not None and not return_monitor.is_pending(step_index):
+            continue
         label = GATHER_RESOURCES[resource]
         image = task_screen(serial)
         if not town_button(image):
@@ -1582,7 +1586,7 @@ def run_gather(serial, help_template, nav_template, text_template, reconnect_tem
             raise RuntimeError(f"{label}采集出征后未返回野外界面")
         print(f"已派遣{label}采集队伍", flush=True)
         if return_monitor is not None:
-            return_monitor.dispatched(before_dispatch, image)
+            return_monitor.dispatched(before_dispatch, image, step=step_index)
     if not town_button(image):
         raise RuntimeError("采集结束后未确认野外界面")
     return image
@@ -3164,9 +3168,17 @@ def crystal_target(image, template, near=None):
         # Require the sampled icon colours/white backing as well; otherwise a
         # successful collection keeps clicking unrelated island decorations.
         reference = candidate.convert("RGB")
+        # The building upgrade arrow also has a green silhouette on white.
+        # Its colour difference is ~55, so colour distance alone accepted it.
+        # Require the pale green leaf veins, absent from the solid green arrow.
         colour_limit = 30 if candidate is nox_tutorial else 55
         def matches_colours(x, y):
             crop = image.crop((x, y, x + candidate.width, y + candidate.height)).convert("RGB")
+            veins = sum(g > 200 and b > 100 and g > r + 30 for r, g, b in crop.getdata())
+            # The tutorial finger covers the veins; its distinct hand outline
+            # is checked by the stricter tutorial silhouette score instead.
+            if candidate is not tutorial and veins < candidate.width * candidate.height * .03:
+                return False
             channels = ImageStat.Stat(ImageChops.difference(crop, reference)).mean
             return sum(channels) / len(channels) <= colour_limit
         score, x, y = matched_mask(image, candidate, x_range, y_range, green_mask,

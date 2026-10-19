@@ -165,6 +165,22 @@ class NoxSamplesTest(unittest.TestCase):
         self.assertEqual(bot.treasure_back_target(frame), (960, 640))
         self.assertEqual(adapter.geometry("small-nox").point(960, 640), (960, 362))
 
+    def test_main_account_completed_treasure_ignores_pet_background(self):
+        path = bot.ROOT / "tests/fixtures/nox/treasure-completed-main-1019-native.png"
+        with Image.open(path) as native:
+            adapter = ScreenAdapter()
+            frame = adapter.frame("main-nox", native.convert("RGB"))
+            self.assertIsNotNone(bot.intelligence_text_target(
+                frame, ("寻宝完成",), (350, 680, 730, 810)))
+            self.assertEqual(bot.treasure_back_target(frame), (960, 640))
+            self.assertEqual(adapter.geometry("main-nox").point(960, 640), (960, 362))
+            self.assertEqual(adapter.geometry("main-nox").point(540, 1490), (540, 1212))
+            hidden = native.convert("RGB")
+            hidden.paste("black", (440, 400, 640, 475))
+            cleared = ScreenAdapter().frame("main-nox", hidden)
+        self.assertIsNone(bot.intelligence_text_target(
+            cleared, ("寻宝完成",), (350, 680, 730, 810)))
+
     def test_treasure_dispatch_button_keeps_center_anchor(self):
         path = bot.ROOT / "tests/fixtures/nox/20261018-012649-271148/tour-treasure-019-native.png"
         with Image.open(path) as native:

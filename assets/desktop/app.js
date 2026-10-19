@@ -18,6 +18,14 @@ let syncTimer = null;
 let taskStatusKey = "";
 let updateState = null;
 let updateRequestPending = false;
+let updateCheckPending = false;
+let updateCheckError = "";
+let updateLabelPhase = "";
+let updateLabelTimer = null;
+let showLatestVersion = false;
+let latestVersionUntil = 0;
+const autoUpdateInterval = 24 * 60 * 60 * 1000;
+let lastUpdateCheck = Date.now();
 const deviceStatuses = {stopped: "未启动", starting: "启动中", restarting: "重启中", running: "已启动", unknown: "状态待确认", unauthorized: "待授权", offline: "离线"};
 const deviceStatus = device => device.kind === "physical" && device.status === "running" ? "已连接" : deviceStatuses[device.status];
 const deviceName = device => device.name + (device.kind === "physical" ? "（真机）" : "（模拟器）");
@@ -458,14 +466,38 @@ function render(state) {
 function renderUpdate(update) {
   if (!update) return;
   updateState = update;
-  const busy = ["checking", "downloading", "cancelling", "ready", "installing"].includes(update.phase);
+  const phase = updateCheckPending ? "checking" : updateCheckError ? "error" : update.phase;
+  const checking = phase === "checking";
+  const busy = ["checking", "downloading", "cancelling", "installing"].includes(phase);
   const hasUpdate = Boolean(update.new_version);
-  $("app-version").textContent = "v" + update.version;
+  if (phase !== updateLabelPhase) {
+    clearTimeout(updateLabelTimer);
+    showLatestVersion = phase === "current";
+    latestVersionUntil = showLatestVersion ? Date.now() + 3000 : 0;
+    updateLabelPhase = phase;
+    if (showLatestVersion) updateLabelTimer = setTimeout(() => {
+      showLatestVersion = false;
+      renderUpdate(updateState);
+    }, 3000);
+  }
+  const error = phase === "error";
+  const label = checking ? "正在检查更新" : error ? updateCheckError || update.message :
+    hasUpdate ? "有新版本：v" + update.new_version : showLatestVersion && Date.now() < latestVersionUntil ? "已是最新版本" : "v" + update.version;
+  $("app-version").textContent = label;
+  $("app-version").hidden = checking;
+  $("check-updates").querySelector(".version-spinner").hidden = !checking;
+  $("check-updates").classList.toggle("alert", !checking && (error || hasUpdate));
+  $("check-updates").setAttribute("aria-busy", String(checking));
+  $("check-updates").setAttribute("aria-label", label);
   $("check-updates").disabled = !connected || busy;
-  $("check-updates").title = update.phase === "error" && !hasUpdate ? update.message + "；点击重试" : "点击检查更新";
-  $("new-version").hidden = !hasUpdate;
-  $("new-version").disabled = !connected;
-  $("new-version").setAttribute("aria-label", hasUpdate ? "查看新版本 v" + update.new_version : "新版本");
+  $("check-updates").title = checking ? label : error ? label + "；点击重试" : hasUpdate ? "点击查看新版本详情" : "点击检查更新";
+  if (hasUpdate && !error) {
+    $("check-updates").setAttribute("aria-haspopup", "dialog");
+    $("check-updates").setAttribute("aria-controls", "update-dialog");
+  } else {
+    $("check-updates").removeAttribute("aria-haspopup");
+    $("check-updates").removeAttribute("aria-controls");
+  }
   $("update-current").textContent = "当前 v" + update.version;
   $("update-version").textContent = hasUpdate ? "v" + update.new_version : "";
   const notes = update.notes || "该版本未提供更新说明";
@@ -482,9 +514,26 @@ function renderUpdate(update) {
   $("update-cancel").disabled = updateRequestPending || ["cancelling", "installing"].includes(update.phase);
 }
 
-$("new-version").addEventListener("click", () => {
-  if (connected && updateState?.new_version && !$("update-dialog").open) $("update-dialog").showModal();
-});
+async function checkUpdates() {
+  if (!connected || !updateState || updateCheckPending || ["checking", "downloading", "cancelling", "ready", "installing"].includes(updateState.phase)) return;
+  updateCheckPending = true;
+  updateCheckError = "";
+  lastUpdateCheck = Date.now();
+  renderUpdate(updateState);
+  try { render(await window.pywebview.api.check_updates()); }
+  catch (error) { updateCheckError = error.message || String(error); }
+  finally {
+    updateCheckPending = false;
+    renderUpdate(updateState);
+  }
+}
+
+function checkUpdatesIfDue() {
+  if (document.visibilityState === "visible" && Date.now() - lastUpdateCheck >= autoUpdateInterval) checkUpdates();
+}
+// Like Clash Verge Rev: check on startup (in the backend), then daily while visible.
+setInterval(checkUpdatesIfDue, 60 * 1000);
+document.addEventListener("visibilitychange", checkUpdatesIfDue);
 function dismissUpdate() {
   if ($("update-cancel").disabled) return;
   if (updateState?.phase === "downloading") queue(async () => render(await window.pywebview.api.cancel_update_download()));
@@ -492,10 +541,12 @@ function dismissUpdate() {
 }
 $("update-cancel").addEventListener("click", dismissUpdate);
 $("update-dialog").addEventListener("cancel", event => { event.preventDefault(); dismissUpdate(); });
-$("update-dialog").addEventListener("close", () => { if (!$("new-version").hidden) $("new-version").focus(); });
+$("update-dialog").addEventListener("close", () => $("check-updates").focus());
 $("check-updates").addEventListener("click", () => {
-  $("check-updates").disabled = true;
-  queue(async () => render(await window.pywebview.api.check_updates()));
+  if ($("check-updates").disabled) return;
+  if (updateState?.new_version && updateState.phase !== "error" && !updateCheckError) {
+    if (!$("update-dialog").open) $("update-dialog").showModal();
+  } else checkUpdates();
 });
 $("update-action").addEventListener("click", () => {
   if (updateRequestPending || $("update-action").disabled) return;
@@ -573,7 +624,6 @@ window.addEventListener("gamebot-backend-error", event => {
   $("refresh").disabled = true;
   $("device").disabled = true;
   $("check-updates").disabled = true;
-  $("new-version").disabled = true;
   $("update-action").disabled = true;
   closeDevices();
   $("device-status").textContent = "Python 后台已断开";

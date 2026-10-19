@@ -70,17 +70,86 @@ class GatherReturnTest(unittest.TestCase):
         self.assertFalse(self.ready([]))
         self.assertEqual(self.task.next_check_at, 230)
 
-    def test_expired_return_requires_fewer_marches_and_missing_resource(self):
+    def test_expired_return_ignores_other_marches_replacing_its_capacity(self):
         self.sync([self.row('returning', 10), self.row('outbound', 8, self.hunt)])
         self.clock.now = 110
-        # Another march replacing the resource gives no capacity evidence.
+        # An intelligence march can replace the returning resource's capacity.
         self.assertFalse(self.ready([self.row('outbound', 300, self.hunt),
                                      self.row('outbound', 300, self.hunt)]))
-        self.assertEqual(self.task.next_check_at, 170)
-        self.clock.now = 170
-        self.assertFalse(self.ready([self.row('outbound', 240, self.hunt)]))
-        self.clock.now = 175
-        self.assertTrue(self.ready([self.row('outbound', 235, self.hunt)]))
+        self.assertEqual(self.task.next_check_at, 115)
+        self.clock.now = 115
+        self.assertTrue(self.ready([self.row('outbound', 295, self.hunt),
+                                    self.row('outbound', 295, self.hunt)]))
+
+    def test_only_returned_configured_item_is_released(self):
+        self.task = GatherTask(bot, 'test', (None,) * 4,
+                               steps=[('meat', 8), ('wood', 8), ('coal', 3)])
+        icons = [self.hunt, self.wood, Image.new('RGB', (54, 48), (30, 30, 30))]
+        self.task.icons = icons
+        self.sync([self.row('gathering', seconds, icon)
+                   for seconds, icon in zip((500, 1000, 2000), icons)])
+        self.assertEqual(self.task.pending, [])
+        self.clock.now = 600
+        self.sync([self.row('returning', 10, icons[0]),
+                   self.row('gathering', 500, icons[1]), self.row('gathering', 1500, icons[2])])
+        self.clock.now = 610
+        remaining = [self.row('gathering', 490, icons[1]), self.row('gathering', 1490, icons[2]),
+                     self.row('outbound', 100, Image.new('RGB', (54, 48), (250, 250, 250)))]
+        self.assertFalse(self.sync(remaining))
+        self.clock.now = 615
+        self.assertTrue(self.sync(remaining))
+        with patch.object(self.task, 'rows', return_value=remaining):
+            self.assertEqual(self.task.available_steps(object()), [(0, ('meat', 8))])
+        self.assertEqual(len(self.task.queues), 2)
+
+    def test_existing_configured_queues_prevent_replay_on_restart(self):
+        self.task = GatherTask(bot, 'test', (None,) * 4, steps=[('coal', 8)] * 3)
+        rows = [self.row('gathering', n) for n in (100, 200, 300)]
+        rows.append(self.row('outbound', 40, self.hunt))
+        with patch.object(self.task, 'rows', return_value=rows):
+            self.assertEqual(self.task.available_steps(object()), [])
+            self.assertEqual(self.task.available_steps(object()), [])
+        self.assertEqual([q.step for q in self.task.queues], [0, 1, 2])
+
+    def test_delayed_dispatch_ocr_reserves_item_until_it_can_be_identified(self):
+        self.task = GatherTask(bot, 'test', (None,) * 4,
+                               steps=[('wood', 8), ('coal', 3)])
+        with patch.object(self.task, 'rows', side_effect=[[], None]):
+            self.task.dispatched(object(), object(), step=0)
+        with patch.object(self.task, 'rows', return_value=[self.row('gathering', 100)]):
+            self.assertEqual(self.task.available_steps(object()), [(1, ('coal', 3))])
+        self.assertEqual([q.step for q in self.task.queues], [0])
+
+    def test_extra_existing_gather_queues_do_not_create_additional_config_slots(self):
+        self.task = GatherTask(bot, 'test', (None,) * 4, steps=[('coal', 8)] * 3)
+        rows = [self.row('gathering', n) for n in (100, 200, 300, 400, 500)]
+        with patch.object(self.task, 'rows', return_value=rows):
+            self.assertEqual(self.task.available_steps(object()), [])
+        self.assertEqual([q.step for q in self.task.queues], [0, 1, 2, None, None])
+
+    def test_unreadable_drawer_cannot_dispatch_configured_items(self):
+        with patch.object(self.task, 'rows', return_value=None):
+            with self.assertRaises(bot.QueueCapacityUnavailable):
+                self.task.available_steps(object())
+
+    def test_startup_unidentified_return_cannot_duplicate_a_configured_item(self):
+        self.task = GatherTask(bot, 'test', (None,) * 4, steps=[('wood', 8)] * 3)
+        rows = [self.row('gathering', 1000), self.row('gathering', 2000),
+                self.row('returning', 20, self.hunt)]
+        with patch.object(self.task, 'rows', return_value=rows):
+            self.assertEqual(self.task.available_steps(object()), [])
+        self.assertEqual(len(self.task.queues), 2)
+        with patch.object(self.task, 'rows', return_value=rows[:2]):
+            self.assertEqual(self.task.available_steps(object()), [(2, ('wood', 8))])
+
+    def test_repeated_sync_of_same_frame_does_not_skip_return_confirmation(self):
+        self.sync([self.row('returning', 10)])
+        self.clock.now = 110
+        self.assertFalse(self.sync([]))
+        self.assertFalse(self.sync([]))
+        self.assertEqual(len(self.task.queues), 1)
+        self.clock.now = 115
+        self.assertTrue(self.sync([]))
 
     def test_returning_resource_still_visible_is_not_home(self):
         self.sync([self.row('returning', 10), self.row('outbound', 10, self.hunt)])
@@ -164,8 +233,57 @@ class GatherReturnTest(unittest.TestCase):
         self.assertEqual([row.seconds for row in rows], [21721, 21828, 22025, 50])
         self.task.icons = []
         self.task.learn(rows)
-        self.assertEqual(len(self.task.icons), 3)
-        self.assertFalse(self.task.known(rows[-1].icon))
+        self.assertEqual(len(self.task.icons), 4)
+        self.assertTrue(self.task.known(rows[-1].icon))
+
+    def test_nox_resource_icons_identify_existing_outbound_item_by_configuration(self):
+        from screen_geometry import ScreenAdapter
+        path = bot.ROOT / 'tests/fixtures/nox/20261018-131652-404691/tour-gather-078-native.png'
+        with Image.open(path) as source:
+            frame = ScreenAdapter().frame('sample', source.convert('RGB'))
+        self.task = GatherTask(bot, 'test', (None,) * 4,
+                               steps=[('iron', 7), ('coal', 3), ('wood', 8), ('meat', 8)])
+        rows = self.task.rows(frame)
+        self.assertEqual([row.resource for row in rows], ['meat', 'wood', 'coal', 'iron'])
+        self.sync(rows)
+        self.assertEqual([queue.step for queue in self.task.queues], [3, 2, 1, 0])
+        self.assertEqual(self.task.pending, [])
+
+    def test_main_nox_three_coal_queues_ignore_live_intelligence_march(self):
+        from screen_geometry import ScreenAdapter
+        path = bot.ROOT / 'tests/fixtures/nox/gather-main-intel-mixed-1019-native.png'
+        with Image.open(path) as source:
+            frame = ScreenAdapter().frame('main', source.convert('RGB'))
+        self.task = GatherTask(bot, 'test', (None,) * 4, steps=[('coal', 8)] * 3)
+        rows = self.task.rows(frame)
+        self.assertEqual([row.resource for row in rows], ['coal', 'coal', 'coal', None])
+        self.assertEqual([row.phase for row in rows], ['gathering'] * 3 + ['outbound'])
+        self.sync(rows)
+        self.assertEqual(len(self.task.queues), 3)
+        self.assertEqual(self.task.pending, [])
+
+    def test_main_nox_return_flag_inherits_only_the_missing_coal_queue(self):
+        from screen_geometry import ScreenAdapter
+        frames = []
+        for name in ('gather-main-intel-mixed-1019', 'gather-main-single-return-1019'):
+            with Image.open(bot.ROOT / f'tests/fixtures/nox/{name}-native.png') as source:
+                frames.append(ScreenAdapter().frame(name, source.convert('RGB')))
+        self.task = GatherTask(bot, 'test', (None,) * 4, steps=[('coal', 8)] * 3)
+        before, after = [self.task.rows(frame) for frame in frames]
+        # The ordinary intelligence march has finished before the coal recall.
+        self.sync(before[:3])
+        first, second, third = self.task.queues
+        self.sync(after)
+        self.assertEqual((first.phase, second.phase, third.phase),
+                         ('returning', 'gathering', 'gathering'))
+        self.assertEqual(first.due, self.clock.now + after[0].seconds)
+        self.assertEqual(self.task.pending, [])
+
+    def test_other_new_return_flag_does_not_replace_visible_gathering_queue(self):
+        self.sync([self.row('gathering', 1000), self.row('outbound', 30, self.hunt)])
+        self.sync([self.row('gathering', 990), self.row('returning', 20, self.hunt)])
+        self.assertEqual(len(self.task.queues), 1)
+        self.assertEqual(self.task.queues[0].phase, 'gathering')
 
     def test_incomplete_or_failed_ocr_is_unknown(self):
         frame = Image.new('RGB', bot.EXPECTED_SIZE)
